@@ -96,6 +96,22 @@ jobs:
             python scripts/scheduled_run.py
           fi
 
+      # Durable backup, independent of the Actions cache: the cache is
+      # ephemeral (LRU-evicted, no audit trail, no recovery path if a
+      # write ever silently fails) - the only thing standing between
+      # "never lose any data" and a bad day is this. Piggybacks on the
+      # once-daily handicap-sweep cron as a natural low-frequency trigger
+      # (not every 5min - a release upload of the full DB isn't free,
+      # and daily recovery-point granularity is enough for a backup of
+      # last resort). Release assets aren't subject to cache eviction at
+      # all, so this is meaningfully more durable than the cache, not
+      # just a second copy of the same risk.
+      - name: Backup database to db-sync release
+        if: github.event.schedule == '13 3 * * *' && (github.event.inputs.db_sync == 'none' || github.event.inputs.db_sync == '')
+        run: gh release upload db-sync data/vb.sqlite --repo "${{ github.repository }}" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       # Every cycle regenerates the dashboard from whatever's in the DB
       # at that point and republishes it to GitHub Pages - a persistent,
       # always-fresh URL instead of a manually-regenerated, manually-
