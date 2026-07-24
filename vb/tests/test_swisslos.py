@@ -1,9 +1,26 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from vb.sources.swisslos import _competition_name, _parse_kickoff
+from vb.models import MarketType
+from vb.sources.swisslos import SwisslosClient, _competition_name, _parse_kickoff
 
 ZURICH = ZoneInfo("Europe/Zurich")
+
+
+class _FakeRowElement:
+    """Stands in for a Playwright ElementHandle for _parse_row tests -
+    only the two methods _parse_row actually calls."""
+
+    def __init__(self, row_id: str, texts: list[str]):
+        self._row_id = row_id
+        self._texts = texts
+
+    def get_attribute(self, name):
+        assert name == "id"
+        return self._row_id
+
+    def eval_on_selector_all(self, selector, script):
+        return self._texts
 
 
 def test_parse_kickoff_heute():
@@ -55,3 +72,50 @@ def test_competition_name_strips_trailing_column_labels():
 
 def test_competition_name_strips_trailing_count():
     assert _competition_name("Klub-Freundschaftsspiele10") == "Klub-Freundschaftsspiele"
+
+
+def test_parse_row_handles_match_winner_only_row():
+    # Reproduces a real gap found live: lower-tier competitions (e.g.
+    # DFB-Pokal) only ever show match-winner odds, no totals column - a
+    # 7-item row, not the 10-item pattern most competitions have. This
+    # used to be silently dropped entirely.
+    row_el = _FakeRowElement(
+        "sportsSportsGrid_row_0_asw:event:abc123",
+        ["Preussen Munster", "Karlsruhe", "Fr. 21.8 • 18:00", "• 1 >>", "2.75", "3.25", "2.30"],
+    )
+    now_local = datetime(2026, 8, 1, 10, 0, tzinfo=ZURICH)
+
+    row = SwisslosClient._parse_row(row_el, "DFB-Pokal", "soccer", datetime.now(timezone.utc), now_local)
+
+    assert row is not None
+    assert len(row.snapshots) == 1
+    assert row.snapshots[0].market_type == MarketType.MATCH_WINNER
+    odds = {o.selection.value: o.odds for o in row.snapshots[0].outcomes}
+    assert odds == {"home": 2.75, "draw": 3.25, "away": 2.30}
+
+
+def test_parse_row_still_handles_full_ten_item_row():
+    row_el = _FakeRowElement(
+        "sportsSportsGrid_row_0_asw:event:xyz789",
+        ["Dortmund", "Bayern Munich", "Sa. 22.8 • 20:30", "• 124 >>", "4.80", "4.30", "1.62", "1.83", "3.5", "1.90"],
+    )
+    now_local = datetime(2026, 8, 1, 10, 0, tzinfo=ZURICH)
+
+    row = SwisslosClient._parse_row(row_el, "Bundesliga", "soccer", datetime.now(timezone.utc), now_local)
+
+    assert row is not None
+    assert len(row.snapshots) == 2
+    market_types = {s.market_type for s in row.snapshots}
+    assert market_types == {MarketType.MATCH_WINNER, MarketType.TOTALS}
+
+
+def test_parse_row_returns_none_for_too_few_items():
+    row_el = _FakeRowElement(
+        "sportsSportsGrid_row_0_asw:event:short1",
+        ["Team A", "Team B", "Heute • 18:00"],  # no odds at all yet
+    )
+    now_local = datetime(2026, 8, 1, 10, 0, tzinfo=ZURICH)
+
+    row = SwisslosClient._parse_row(row_el, "Some League", "soccer", datetime.now(timezone.utc), now_local)
+
+    assert row is None

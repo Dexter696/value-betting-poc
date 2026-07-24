@@ -7,6 +7,7 @@ isolated in its own try/except so one site failing (a scraper breaking,
 a network hiccup) doesn't take down the whole cycle or block the others.
 """
 
+import argparse
 import logging
 import sys
 import traceback
@@ -57,6 +58,19 @@ def capture_swisslos(conn) -> None:
     log.info("swisslos: captured %d events, %d snapshots", len(rows), sum(len(r.snapshots) for r in rows))
 
 
+def capture_swisslos_full(conn) -> None:
+    # Full country-by-country sweep (~290s) - takes much longer than the
+    # quick single-page fetch_football(), which is why this runs on its
+    # own, less-frequent schedule rather than every cycle. See
+    # SwisslosClient.fetch_all_countries() docstring for why a concurrent
+    # version wasn't kept (measured slower on this machine).
+    client = SwisslosClient(headless=True)
+    rows = client.fetch_all_countries()
+    for row in rows:
+        save_raw_capture(conn, row.event, row.snapshots)
+    log.info("swisslos (full breadth): captured %d events, %d snapshots", len(rows), sum(len(r.snapshots) for r in rows))
+
+
 def capture_loro(conn) -> None:
     client = LoroClient(headless=True)
     rows = client.fetch_football()
@@ -77,10 +91,19 @@ def run_pipeline(conn) -> None:
 
 
 def main() -> None:
-    log.info("=== cycle start ===")
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--full-swisslos", action="store_true",
+        help="Use the full country-by-country Swisslos sweep instead of the quick single-page fetch. "
+             "Takes ~5min longer - meant for a less-frequent schedule (~15-20min), not every cycle.",
+    )
+    args = parser.parse_args()
+
+    log.info("=== cycle start (full_swisslos=%s) ===", args.full_swisslos)
     conn = init_db(DB_PATH)
 
-    for name, fn in [("pinnacle", capture_pinnacle), ("swisslos", capture_swisslos), ("loro", capture_loro)]:
+    swisslos_fn = capture_swisslos_full if args.full_swisslos else capture_swisslos
+    for name, fn in [("pinnacle", capture_pinnacle), ("swisslos", swisslos_fn), ("loro", capture_loro)]:
         try:
             fn(conn)
         except Exception:

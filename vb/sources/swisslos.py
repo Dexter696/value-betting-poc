@@ -31,24 +31,44 @@ the DOM after load, no scroll-triggered lazy loading to handle.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 from ..models import MarketSnapshot, MarketType, Outcome, RawEvent, Selection
 
 SITE = "swisslos.ch"
 # The "Alle Bewerbe" (all competitions) tab, not the default "Top Bewerbe"
-# view - roughly doubles coverage (confirmed live 2026-07-23: ~20 events
-# vs ~10-17 on the default view). This still isn't the full ~517 the
-# sidebar count claims for the whole football section; reaching that
-# would mean iterating every competition individually (comparable in
-# scope to Pinnacle's fetch_all_soccer() league sweep) - not done here.
+# view - roughly doubles coverage vs the default view. Used by
+# fetch_football() for a quick single-page fetch; fetch_all_countries()
+# below is what actually reaches full breadth.
 FOOTBALL_URL = "https://www.swisslos.ch/de/sporttip/sportwetten/fussball?viewConfig=id:asw:viewconfig:100"
+
+# Every country/competition-group slug Swisslos's own country picker
+# lists for football (confirmed live 2026-07-24 by opening the picker and
+# scrolling it to force all entries to render, then reading each link's
+# href - see project notes). Each is its own page at
+# swisslos.ch/de/sporttip/sportwetten/fussball/{slug} showing that
+# country/competition's full match list directly (no lazy-loading tricks
+# needed there, unlike the aggregate "Alle Bewerbe" view). This list is
+# static, not re-derived at runtime, so it'll silently miss any
+# competition Swisslos adds later - re-derive it the same way if
+# coverage looks stale.
+SOCCER_COUNTRY_SLUGS = [
+    "schweiz", "klub-freundschaftsspiele", "polen", "rumaenien", "daenemark",
+    "schweden", "island", "norwegen", "argentinien", "brasilien", "usa",
+    "england", "spanien", "italien", "deutschland", "champions-league",
+    "europa-league", "conference-league", "wm-2030", "belgien", "bolivien",
+    "bulgarien", "chile", "china", "em-2028", "frankreich", "griechenland",
+    "international-rest", "kroatien", "mexiko", "niederlande", "oesterreich",
+    "portugal", "schottland", "slowakei", "slowenien", "suedkorea",
+    "tschechien", "tuerkei", "ungarn", "uruguay", "wales",
+]
 
 _ROW_ID_RE = re.compile(r"^sportsSportsGrid_row_\d+_asw:event:([0-9a-zA-Z]+)$")
 _ZURICH = ZoneInfo("Europe/Zurich")
@@ -110,44 +130,113 @@ class SwisslosClient:
         self.timeout_ms = timeout_ms
 
     def fetch_football(self, sport: str = "soccer") -> list[ScrapedRow]:
-        captured_at = datetime.now(timezone.utc)
-        now_local = datetime.now(_ZURICH)
-
+        """Quick single-page fetch of the "Alle Bewerbe" aggregate view.
+        Faster than fetch_all_countries() but only ever shows the subset of
+        competitions that view surfaces - use fetch_all_countries() for
+        full breadth.
+        """
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=self.headless)
             try:
                 page = browser.new_page()
-                page.goto(FOOTBALL_URL, wait_until="load", timeout=self.timeout_ms)
-                page.wait_for_selector('[id^="sportsSportsGrid_row_"]', timeout=self.timeout_ms)
-                page.wait_for_timeout(1500)
+                return self._fetch_page(page, FOOTBALL_URL, sport)
+            finally:
+                browser.close()
 
+    def fetch_all_countries(self, sport: str = "soccer") -> list[ScrapedRow]:
+        """Full-breadth fetch: visits every page in SOCCER_COUNTRY_SLUGS in
+        one browser session (reusing a single page/tab, not relaunching
+        Chromium per country) and aggregates the results, deduping by
+        event_id since international competitions (Champions League etc)
+        can appear under more than one country grouping.
+
+        Measured ~290s for all 42 pages live. Concurrent tabs (async
+        Playwright, several contexts in parallel) were tried to cut that
+        down but measured *slower* on this machine - the CPU has no spare
+        headroom for parallel Chromium rendering, so contention outweighs
+        any overlap benefit. Kept sequential; this method runs on its own,
+        less-frequent schedule (~15-20 min) rather than the 5-min
+        Pinnacle/Loro/quick-Swisslos cadence, so ~290s fits comfortably.
+        """
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=self.headless)
+            try:
+                page = browser.new_page()
+                seen_ids: set[str] = set()
                 results: list[ScrapedRow] = []
-                for group in page.query_selector_all("asw-sports-grid-expandable"):
-                    header_el = group.query_selector(":scope > div")
-                    competition = _competition_name(header_el.inner_text() if header_el else "")
-
-                    for row_el in group.query_selector_all('[id^="sportsSportsGrid_row_"]'):
-                        row = self._parse_row(row_el, competition, sport, captured_at, now_local)
-                        if row is not None:
+                for slug in SOCCER_COUNTRY_SLUGS:
+                    url = f"https://www.swisslos.ch/de/sporttip/sportwetten/fussball/{slug}"
+                    try:
+                        rows = self._fetch_page(page, url, sport)
+                    except PlaywrightTimeoutError:
+                        logging.getLogger("vb.sources.swisslos").warning(
+                            "timed out loading %s - skipping this cycle", slug
+                        )
+                        continue
+                    for row in rows:
+                        if row.event.event_id not in seen_ids:
+                            seen_ids.add(row.event.event_id)
                             results.append(row)
                 return results
             finally:
                 browser.close()
 
+    def _fetch_page(self, page: Page, url: str, sport: str) -> list[ScrapedRow]:
+        captured_at = datetime.now(timezone.utc)
+        now_local = datetime.now(_ZURICH)
+
+        page.goto(url, wait_until="load", timeout=self.timeout_ms)
+        try:
+            page.wait_for_selector('[id^="sportsSportsGrid_row_"]', timeout=self.timeout_ms)
+        except PlaywrightTimeoutError:
+            # A real, if uncommon, case: some country pages currently have
+            # no fixtures listed at all (nothing scheduled) rather than a
+            # load failure - treat as zero rows, not an error.
+            return []
+        page.wait_for_timeout(1500)
+
+        results: list[ScrapedRow] = []
+        for group in page.query_selector_all("asw-sports-grid-expandable"):
+            header_el = group.query_selector(":scope > div")
+            competition = _competition_name(header_el.inner_text() if header_el else "")
+
+            for row_el in group.query_selector_all('[id^="sportsSportsGrid_row_"]'):
+                row = self._parse_row(row_el, competition, sport, captured_at, now_local)
+                if row is not None:
+                    results.append(row)
+        return results
+
     @staticmethod
     def _parse_row(row_el, competition: str, sport: str, captured_at: datetime, now_local: datetime) -> Optional["ScrapedRow"]:
+        """Sync-Playwright entry point: pulls id/texts off a real (or fake,
+        in tests) ElementHandle, then hands off to the pure _parse_row_data
+        so the async fetch path (_fetch_page_async) can share the same
+        parsing logic without needing an ElementHandle at all.
+        """
         row_id = row_el.get_attribute("id") or ""
-        m = _ROW_ID_RE.match(row_id)
-        if not m:
-            return None  # a sub-element (icon, tap-area, ...), not a top-level row
-
         texts = row_el.eval_on_selector_all(
             "*",
             "els => els.filter(e => e.children.length === 0 && "
             "e.textContent.trim()).map(e => e.textContent.trim())",
         )
-        if len(texts) < 10:
-            return None  # incomplete row (market not offered / not yet rendered) - skip rather than guess
+        return SwisslosClient._parse_row_data(row_id, texts, competition, sport, captured_at, now_local)
+
+    @staticmethod
+    def _parse_row_data(
+        row_id: str, texts: list[str], competition: str, sport: str, captured_at: datetime, now_local: datetime
+    ) -> Optional["ScrapedRow"]:
+        m = _ROW_ID_RE.match(row_id)
+        if not m:
+            return None  # a sub-element (icon, tap-area, ...), not a top-level row
+
+        # [home, away, date, count, ml_home, ml_draw, ml_away] is the
+        # minimum (7) - some competitions (lower-tier leagues, cups like
+        # DFB-Pokal) only ever show match-winner odds, no totals column.
+        # When totals ARE shown, 3 more items follow (over, line, under),
+        # for 10 total. Fewer than 7 means the row hasn't finished
+        # rendering / no market at all - skip rather than guess.
+        if len(texts) < 7:
+            return None
 
         home, away, rel_time = texts[0], texts[1], texts[2]
         kickoff = _parse_kickoff(rel_time, now_local)
@@ -183,22 +272,23 @@ class SwisslosClient:
         except ValueError:
             pass  # not parseable as odds (e.g. market suspended/placeholder) - skip that market, keep the event
 
-        try:
-            odds_over, total_line, odds_under = float(texts[7]), float(texts[8]), float(texts[9])
-            snapshots.append(
-                MarketSnapshot(
-                    event=event,
-                    market_type=MarketType.TOTALS,
-                    line=total_line,
-                    outcomes=(
-                        Outcome(Selection.OVER, odds_over),
-                        Outcome(Selection.UNDER, odds_under),
-                    ),
-                    captured_at=captured_at,
+        if len(texts) >= 10:
+            try:
+                odds_over, total_line, odds_under = float(texts[7]), float(texts[8]), float(texts[9])
+                snapshots.append(
+                    MarketSnapshot(
+                        event=event,
+                        market_type=MarketType.TOTALS,
+                        line=total_line,
+                        outcomes=(
+                            Outcome(Selection.OVER, odds_over),
+                            Outcome(Selection.UNDER, odds_under),
+                        ),
+                        captured_at=captured_at,
+                    )
                 )
-            )
-        except ValueError:
-            pass
+            except ValueError:
+                pass  # totals column present but not parseable - skip that market, keep the rest
 
         if not snapshots:
             return None

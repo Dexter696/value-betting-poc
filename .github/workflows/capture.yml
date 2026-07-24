@@ -7,7 +7,13 @@ name: VB Capture Pipeline
 # for the pruning that keeps the cached DB bounded in size.
 on:
   schedule:
+    # Quick cycle: Pinnacle + Loro + quick single-page Swisslos fetch.
     - cron: "*/5 * * * *"
+    # Full-breadth Swisslos sweep (~5min on its own - see
+    # SwisslosClient.fetch_all_countries()) - offset from the */5 grid
+    # (7/27/47 rather than a multiple of 5) so the two schedules never
+    # fire in the same minute and queue up on each other.
+    - cron: "7,27,47 * * * *"
   workflow_dispatch: {}
 
 concurrency:
@@ -17,7 +23,10 @@ concurrency:
 jobs:
   capture:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    # The full-breadth Swisslos sweep alone takes ~5min; leave headroom
+    # for Pinnacle+Loro+pipeline+prune on top of that (was 8min when only
+    # the quick Swisslos fetch existed).
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
 
@@ -40,4 +49,9 @@ jobs:
             vb-db-
 
       - name: Run capture + pipeline cycle
-        run: python scripts/scheduled_run.py
+        run: |
+          if [ "${{ github.event.schedule }}" = "7,27,47 * * * *" ]; then
+            python scripts/scheduled_run.py --full-swisslos
+          else
+            python scripts/scheduled_run.py
+          fi
