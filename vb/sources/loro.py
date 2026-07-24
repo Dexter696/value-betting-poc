@@ -42,6 +42,7 @@ individual match pages for more markets, same as Swisslos's handicap gap.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -177,6 +178,16 @@ class LoroClient:
                 page.wait_for_timeout(6000)
 
                 raw_rows = page.evaluate(_EXTRACT_ROWS_JS)
+
+                if not raw_rows:
+                    # Diagnostic for "0 rows" failures that don't raise an
+                    # exception (geo-block page, consent wall, slow render
+                    # on an unfamiliar host) - logged rather than silently
+                    # returning empty, since this scraper runs unattended.
+                    logging.getLogger("vb.sources.loro").warning(
+                        "zero rows extracted - title=%r url=%r body_sample=%r",
+                        page.title(), page.url, page.inner_text("body")[:800],
+                    )
 
                 results: list[ScrapedRow] = []
                 seen_event_ids: set[str] = set()
