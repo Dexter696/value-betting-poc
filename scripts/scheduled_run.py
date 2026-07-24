@@ -32,8 +32,9 @@ log = logging.getLogger("vb.scheduler")
 from vb.pipeline import run_cycle
 from vb.sources.loro import LoroClient
 from vb.sources.pinnacle import PinnacleClient
+from vb.sources.results import find_result
 from vb.sources.swisslos import SwisslosClient
-from vb.storage import init_db, prune_raw_snapshots, save_raw_capture
+from vb.storage import init_db, list_unsettled_matches, prune_raw_snapshots, record_match_result, save_raw_capture
 
 DB_PATH = ROOT / "data" / "vb.sqlite"
 RAW_SNAPSHOT_RETENTION_HOURS = 24
@@ -79,6 +80,23 @@ def capture_loro(conn) -> None:
     log.info("loro: captured %d events, %d snapshots", len(rows), sum(len(r.snapshots) for r in rows))
 
 
+def auto_settle(conn) -> None:
+    # ESPN doesn't cover every league Pinnacle offers (see
+    # vb.sources.results docstring) - matches it can't place still show
+    # up in list_unsettled_matches next cycle and eventually need
+    # scripts/record_result.py by hand. That's expected, not an error.
+    unsettled = list_unsettled_matches(conn, "pinnacle.com")
+    settled_count = 0
+    for event in unsettled:
+        result = find_result(event.competition, event.raw_home_team, event.raw_away_team, event.kickoff_utc)
+        if result is None:
+            continue
+        home_goals, away_goals = result
+        record_match_result(conn, "pinnacle.com", event.event_id, home_goals, away_goals, source="auto:espn")
+        settled_count += 1
+    log.info("auto-settle: %d/%d unsettled match(es) resolved via ESPN", settled_count, len(unsettled))
+
+
 def run_pipeline(conn) -> None:
     for comparison_site in ("swisslos.ch", "loro.ch"):
         touched = run_cycle(conn, "pinnacle.com", comparison_site)
@@ -113,6 +131,11 @@ def main() -> None:
         run_pipeline(conn)
     except Exception:
         log.error("pipeline run failed:\n%s", traceback.format_exc())
+
+    try:
+        auto_settle(conn)
+    except Exception:
+        log.error("auto-settle failed:\n%s", traceback.format_exc())
 
     try:
         deleted = prune_raw_snapshots(conn, keep_hours=RAW_SNAPSHOT_RETENTION_HOURS)

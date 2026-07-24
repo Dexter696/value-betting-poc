@@ -405,6 +405,54 @@ def load_settlement(
     return SettlementResult(row[0]) if row else None
 
 
+def list_unsettled_matches(conn: sqlite3.Connection, benchmark_site: str, kickoff_buffer_hours: float = 3.0) -> list[RawEvent]:
+    """Every benchmark event that has at least one tracked opportunity,
+    is old enough that the match should be over (kickoff + buffer in the
+    past - soccer is ~2h with stoppage, the extra margin covers delayed
+    kickoffs), and has no settlement row yet. This is the worklist for
+    both automated (vb.sources.results) and manual (record_result.py)
+    settlement.
+
+    The opportunity table has no benchmark_event_id column of its own -
+    only market_key (pipeline.market_key(): "{site}:{event_id}:{market_type}:
+    {line}:{selection}:vs:{comparison_site}") - so event ids are pulled out
+    of it in Python rather than via a fragile SQL LIKE/substring match.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=kickoff_buffer_hours)
+
+    event_ids: set[str] = set()
+    for (market_key,) in conn.execute(
+        "SELECT DISTINCT market_key FROM opportunity WHERE benchmark_site = ?", (benchmark_site,)
+    ):
+        event_ids.add(market_key.split(":")[1])
+
+    settled_ids = {
+        event_id
+        for (event_id,) in conn.execute(
+            "SELECT DISTINCT benchmark_event_id FROM settlement WHERE benchmark_site = ?", (benchmark_site,)
+        )
+    }
+
+    results: list[RawEvent] = []
+    for event_id in event_ids - settled_ids:
+        row = conn.execute(
+            "SELECT sport, competition, kickoff_utc, raw_home_team, raw_away_team "
+            "FROM raw_event WHERE site = ? AND event_id = ?",
+            (benchmark_site, event_id),
+        ).fetchone()
+        if row is None:
+            continue  # shouldn't happen (raw_event rows are never deleted) - defensive only
+        sport, competition, kickoff_utc, home, away = row
+        kickoff = datetime.fromisoformat(kickoff_utc)
+        if kickoff >= cutoff:
+            continue  # match hasn't finished yet
+        results.append(RawEvent(
+            site=benchmark_site, sport=sport, competition=competition,
+            kickoff_utc=kickoff, raw_home_team=home, raw_away_team=away, event_id=event_id,
+        ))
+    return results
+
+
 def record_match_result(
     conn: sqlite3.Connection,
     benchmark_site: str,
