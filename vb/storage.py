@@ -22,6 +22,7 @@ _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
 def init_db(path: str | Path) -> sqlite3.Connection:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))

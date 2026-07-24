@@ -33,6 +33,15 @@ def _build_closed_opportunity():
     return tracker.completed[0]
 
 
+def test_init_db_creates_missing_parent_directory(tmp_path):
+    # Matters for a fresh checkout (e.g. GitHub Actions) where data/ isn't
+    # tracked in git at all - sqlite3.connect() alone can't create it.
+    nested_path = tmp_path / "does" / "not" / "exist" / "vb.sqlite"
+    conn = init_db(nested_path)
+    assert nested_path.exists()
+    conn.execute("SELECT 1")  # connection actually usable
+
+
 def test_save_and_load_round_trip(tmp_path):
     conn = init_db(tmp_path / "vb.sqlite")
     opp = _build_closed_opportunity()
