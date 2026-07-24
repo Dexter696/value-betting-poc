@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from vb.models import MarketSnapshot, MarketType, Outcome, RawEvent, Selection
 from vb.opportunity import LegReading, OpportunityTracker
-from vb.reporting import build_finished_matches_report, pre_entry_history_for_opportunity
+from vb.reporting import build_finished_matches_report, outcomes_at_or_before, pre_entry_history_for_opportunity
 from vb.settlement import SettlementResult
 from vb.storage import init_db, record_match_result, save_opportunity, save_raw_capture
 
@@ -200,3 +200,32 @@ def test_pre_entry_history_respects_limit(tmp_path):
     history = pre_entry_history_for_opportunity(conn, tracker.current, limit=5)
 
     assert len(history) == 5  # 8 available, capped at limit
+
+
+def test_outcomes_at_or_before_returns_latest_capture_not_after_cutoff(tmp_path):
+    conn = init_db(tmp_path / "vb.sqlite")
+    event = _event("swisslos.ch", "s1")
+
+    save_raw_capture(conn, event, [_moneyline(event, 2.00, 3.30, 3.90, captured_at=T0)])
+    save_raw_capture(conn, event, [_moneyline(event, 1.90, 3.40, 4.10, captured_at=T0 + timedelta(minutes=10))])
+
+    outcomes = outcomes_at_or_before(conn, "swisslos.ch", "s1", MarketType.MATCH_WINNER, None, at=T0 + timedelta(minutes=5))
+
+    assert outcomes is not None
+    by_selection = {o["selection"]: o["odds"] for o in outcomes}
+    assert by_selection["home"] == 2.00  # the T0 capture, not the later 1.90 one (which is after the cutoff)
+
+
+def test_outcomes_at_or_before_returns_none_when_no_event_id(tmp_path):
+    conn = init_db(tmp_path / "vb.sqlite")
+    assert outcomes_at_or_before(conn, "swisslos.ch", None, MarketType.MATCH_WINNER, None, at=T0) is None
+
+
+def test_outcomes_at_or_before_returns_none_when_nothing_captured_yet(tmp_path):
+    conn = init_db(tmp_path / "vb.sqlite")
+    event = _event("swisslos.ch", "s1")
+    save_raw_capture(conn, event, [_moneyline(event, 2.00, 3.30, 3.90, captured_at=T0)])
+
+    outcomes = outcomes_at_or_before(conn, "swisslos.ch", "s1", MarketType.MATCH_WINNER, None, at=T0 - timedelta(minutes=1))
+
+    assert outcomes is None

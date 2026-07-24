@@ -1,7 +1,11 @@
-"""Build the browsable HTML dashboard: every tracked opportunity (open or
-closed), each with its full pre-entry + trajectory snapshot history and
-settlement result if known. Self-contained single-file output — all data
-is embedded as JSON, no live DB connection needed to view it.
+"""Build the browsable/analysis HTML dashboard: every tracked opportunity
+(open or closed), each with its full pre-entry + trajectory snapshot
+history (all 3 books' full odds at each point, not just the tracked
+selection), settlement result if known, and enough per-leg data embedded
+for the page's own client-side P&L simulator (see dashboard_template.html)
+to recompute flat vs. fractional-Kelly staking scenarios live in the
+browser. Self-contained single-file output — all data is embedded as
+JSON, no live DB connection needed to view it.
 
 Usage: python scripts/build_dashboard.py [output_path]
 Defaults to data/dashboard.html if no path given.
@@ -9,13 +13,14 @@ Defaults to data/dashboard.html if no path given.
 
 import json
 import sys
-from datetime import timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from vb.models import MarketType, Selection
-from vb.reporting import pre_entry_history_for_opportunity
+from vb.evaluation import odds_bucket
+from vb.models import RawEvent
+from vb.reporting import ALL_SITES, _find_matching_event_id, outcomes_at_or_before, pre_entry_history_for_opportunity
 from vb.storage import init_db, load_opportunity, load_settlement
 
 DB_PATH = Path(__file__).parent.parent / "data" / "vb.sqlite"
@@ -24,31 +29,51 @@ DEFAULT_OUTPUT = Path(__file__).parent.parent / "data" / "dashboard.html"
 
 def _match_label(conn, site, event_id):
     row = conn.execute(
-        "SELECT raw_home_team, raw_away_team, competition FROM raw_event WHERE site = ? AND event_id = ?",
+        "SELECT raw_home_team, raw_away_team, competition, kickoff_utc FROM raw_event WHERE site = ? AND event_id = ?",
         (site, event_id),
     ).fetchone()
     if row is None:
-        return None, None, None
-    return row[0], row[1], row[2]
+        return None, None, None, None
+    return row[0], row[1], row[2], row[3]
 
 
-def _snapshot_dict(s):
+def _settlement_source(conn, benchmark_site, benchmark_event_id, market_type, line, selection):
+    row = conn.execute(
+        "SELECT source FROM settlement WHERE benchmark_site=? AND benchmark_event_id=? AND market_type=? "
+        "AND (line IS ? OR line = ?) AND selection=?",
+        (benchmark_site, benchmark_event_id, market_type.value, line, line, selection.value),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def _books_dict(benchmark_site, benchmark_outcomes, comparison_site, comparison_outcomes, third_site, third_outcomes):
     return {
-        "capturedAt": s.captured_at.astimezone(timezone.utc).isoformat(),
-        "benchmarkOdds": s.benchmark_odds,
-        "comparisonOdds": s.comparison_odds,
-        "edgeA": s.edge_a,
-        "edgeB": s.edge_b,
-        "moved": s.movement_source.value,
+        benchmark_site: benchmark_outcomes,
+        comparison_site: comparison_outcomes,
+        third_site: third_outcomes,
     }
 
 
-def _pre_entry_dict(h):
+def _pre_entry_dict(h, benchmark_site, comparison_site, third_site, third_outcomes):
     return {
         "capturedAt": h.captured_at.astimezone(timezone.utc).isoformat(),
-        "benchmarkOdds": h.benchmark_odds,
-        "comparisonOdds": h.comparison_odds,
         "edgeA": h.edge_a,
+        "books": _books_dict(benchmark_site, h.benchmark_outcomes, comparison_site, h.comparison_outcomes, third_site, third_outcomes),
+    }
+
+
+def _snapshot_dict(s, benchmark_site, comparison_site, third_site, third_outcomes):
+    full = s.full_market or {}
+    return {
+        "capturedAt": s.captured_at.astimezone(timezone.utc).isoformat(),
+        "edgeA": s.edge_a,
+        "edgeB": s.edge_b,
+        "moved": s.movement_source.value,
+        "books": _books_dict(
+            benchmark_site, (full.get("benchmark") or {}).get("outcomes"),
+            comparison_site, (full.get("comparison") or {}).get("outcomes"),
+            third_site, third_outcomes,
+        ),
     }
 
 
@@ -64,14 +89,33 @@ def collect_data(conn) -> dict:
     opportunities = []
     instance_ids = [r[0] for r in conn.execute("SELECT instance_id FROM opportunity ORDER BY first_cross_at DESC")]
 
+    # Matching against the third site is a fuzzy-scored lookup (see
+    # reporting._find_matching_event_id) - cache per (site, benchmark
+    # event id) so a match tracked across many snapshots only pays for
+    # it once, not once per snapshot.
+    third_event_id_cache: dict[tuple[str, str], str] = {}
+
     for iid in instance_ids:
         opp = load_opportunity(conn, iid)
         benchmark_event_id = opp.market_key.split(":")[1]
-        home, away, competition = _match_label(conn, opp.benchmark_site, benchmark_event_id)
+        home, away, competition, kickoff_utc = _match_label(conn, opp.benchmark_site, benchmark_event_id)
         if home is None:
             continue
 
+        third_site = next(s for s in ALL_SITES if s not in (opp.benchmark_site, opp.comparison_site))
+
+        cache_key = (third_site, benchmark_event_id)
+        if cache_key not in third_event_id_cache:
+            benchmark_event = RawEvent(
+                site=opp.benchmark_site, sport=opp.sport, competition=competition,
+                kickoff_utc=datetime.fromisoformat(kickoff_utc),
+                raw_home_team=home, raw_away_team=away, event_id=benchmark_event_id,
+            )
+            third_event_id_cache[cache_key] = _find_matching_event_id(conn, third_site, benchmark_event)
+        third_event_id = third_event_id_cache[cache_key]
+
         outcome = load_settlement(conn, opp.benchmark_site, benchmark_event_id, opp.market_type, opp.line, opp.selection)
+        settled_source = _settlement_source(conn, opp.benchmark_site, benchmark_event_id, opp.market_type, opp.line, opp.selection)
 
         try:
             pre_entry = pre_entry_history_for_opportunity(conn, opp, limit=5)
@@ -87,28 +131,45 @@ def collect_data(conn) -> dict:
             if row:
                 home_goals, away_goals = row
 
+        pre_entry_dicts = []
+        for h in pre_entry:
+            third_outcomes = outcomes_at_or_before(conn, third_site, third_event_id, opp.market_type, opp.line, h.captured_at)
+            pre_entry_dicts.append(_pre_entry_dict(h, opp.benchmark_site, opp.comparison_site, third_site, third_outcomes))
+
+        snapshot_dicts = []
+        for s in opp.snapshots:
+            third_outcomes = outcomes_at_or_before(conn, third_site, third_event_id, opp.market_type, opp.line, s.captured_at)
+            snapshot_dicts.append(_snapshot_dict(s, opp.benchmark_site, opp.comparison_site, third_site, third_outcomes))
+
         opportunities.append({
             "instanceId": opp.instance_id,
             "home": home,
             "away": away,
             "competition": competition,
+            "kickoffUtc": kickoff_utc,
             "marketType": opp.market_type.value,
             "line": opp.line,
             "selection": opp.selection.value,
             "benchmarkSite": opp.benchmark_site,
             "comparisonSite": opp.comparison_site,
+            "thirdSite": third_site,
             "isOpen": opp.is_open,
             "resolutionReason": opp.resolution_reason.value if opp.resolution_reason else None,
             "entryEdgeA": opp.entry_edge_a,
+            "entryEdgeB": opp.entry_edge_b,
             "peakEdgeA": opp.peak_edge_a,
+            "entryBenchmarkOdds": opp.snapshots[0].benchmark_odds,
+            "entryComparisonOdds": opp.snapshots[0].comparison_odds,
+            "bucket": odds_bucket(opp.snapshots[0].benchmark_odds),
             "firstCrossAt": opp.first_cross_at.astimezone(timezone.utc).isoformat(),
             "resolvedAt": opp.resolved_at.astimezone(timezone.utc).isoformat() if opp.resolved_at else None,
             "convergenceSeconds": opp.convergence_time.total_seconds() if opp.convergence_time else None,
             "outcome": outcome.value if outcome else None,
+            "settledSource": settled_source,
             "homeGoals": home_goals,
             "awayGoals": away_goals,
-            "preEntry": [_pre_entry_dict(h) for h in pre_entry],
-            "snapshots": [_snapshot_dict(s) for s in opp.snapshots],
+            "preEntry": pre_entry_dicts,
+            "snapshots": snapshot_dicts,
         })
 
     return {"stats": stats, "opportunities": opportunities}

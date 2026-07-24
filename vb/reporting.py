@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -84,6 +84,31 @@ def _latest_odds_for_leg(
         (site, event_id, market_type.value, line, line),
     ).fetchone()
     return _odds_for_selection(row[0], selection) if row else None
+
+
+def outcomes_at_or_before(
+    conn: sqlite3.Connection, site: str, event_id: Optional[str], market_type: MarketType, line: Optional[float],
+    at: datetime,
+) -> Optional[list[dict]]:
+    """Every outcome (not just one selection) for one book's market, as
+    of the latest capture at-or-before `at`. Used to show a third site's
+    full odds alongside the benchmark/comparison pair a given opportunity
+    already tracks per-snapshot (those two carry their own full outcome
+    set via OpportunitySnapshot.full_market - only the site that ISN'T
+    either of those needs this separate per-timestamp lookup). Returns
+    None if that site never captured this leg, or hasn't yet by `at`.
+    """
+    if event_id is None:
+        return None
+    row = conn.execute(
+        """
+        SELECT outcomes_json FROM raw_market_snapshot
+        WHERE site = ? AND event_id = ? AND market_type = ? AND (line IS ? OR line = ?) AND captured_at <= ?
+        ORDER BY captured_at DESC LIMIT 1
+        """,
+        (site, event_id, market_type.value, line, line, at.isoformat()),
+    ).fetchone()
+    return json.loads(row[0]) if row else None
 
 
 def _find_matching_event_id(conn: sqlite3.Connection, site: str, benchmark_event: RawEvent) -> Optional[str]:
@@ -213,6 +238,14 @@ class PreEntryReading:
     benchmark_odds: float
     comparison_odds: float
     edge_a: float
+    # Full outcome sets (not just the tracked selection) for the two
+    # sites this pairing already touches - parsed from the same
+    # outcomes_json already fetched for bm_odds/cmp_odds above, so this
+    # costs nothing extra to include. The third (untracked) site isn't
+    # covered here - callers needing it use outcomes_at_or_before()
+    # separately, the same way build_finished_matches_report() does.
+    benchmark_outcomes: list = field(default_factory=list)
+    comparison_outcomes: list = field(default_factory=list)
 
 
 def pre_entry_history(
@@ -269,6 +302,8 @@ def pre_entry_history(
                 benchmark_odds=bm_odds,
                 comparison_odds=cmp_odds,
                 edge_a=raw_edge(bm_odds, cmp_odds),
+                benchmark_outcomes=json.loads(outcomes_json),
+                comparison_outcomes=json.loads(cmp_row[0]),
             )
         )
     return readings

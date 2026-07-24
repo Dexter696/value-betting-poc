@@ -1,3 +1,4 @@
+<meta charset="utf-8">
 <title>Value Betting — Dashboard</title>
 <style>
   .viz-root {
@@ -12,6 +13,7 @@
     --good:           #008300;
     --bad:            #e34948;
     --accent:         #2a78d6;
+    --accent-2:       #8a5cf5;
     --amber:          #eda100;
   }
   @media (prefers-color-scheme: dark) {
@@ -19,14 +21,14 @@
       color-scheme: dark;
       --surface-1: #1a1a19; --surface-2: #232320; --surface-3: #2b2b27; --border: #3a3934;
       --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #8f8d84;
-      --good: #008300; --bad: #e66767; --accent: #3987e5; --amber: #c98500;
+      --good: #008300; --bad: #e66767; --accent: #3987e5; --accent-2: #a687f7; --amber: #c98500;
     }
   }
   :root[data-theme="dark"] .viz-root {
     color-scheme: dark;
     --surface-1: #1a1a19; --surface-2: #232320; --surface-3: #2b2b27; --border: #3a3934;
     --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #8f8d84;
-    --good: #008300; --bad: #e66767; --accent: #3987e5; --amber: #c98500;
+    --good: #008300; --bad: #e66767; --accent: #3987e5; --accent-2: #a687f7; --amber: #c98500;
   }
 
   .viz-root {
@@ -34,89 +36,125 @@
     color: var(--text-primary);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     padding: 28px 20px 60px;
-    max-width: 920px;
+    max-width: 1180px;
     margin: 0 auto;
     box-sizing: border-box;
   }
   .viz-root * { box-sizing: border-box; }
   .viz-root h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  .viz-root h2 { font-size: 14px; font-weight: 600; margin: 0 0 10px; }
   .subtitle { color: var(--text-secondary); font-size: 13px; margin: 0 0 20px; }
+  .section { margin-bottom: 22px; }
 
-  .tiles { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 20px; }
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 10px; }
+  .tiles.secondary { grid-template-columns: repeat(4, 1fr); }
   .tile { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
-  .tile .value { font-size: 20px; font-weight: 600; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .tile .value { font-size: 19px; font-weight: 600; line-height: 1.1; font-variant-numeric: tabular-nums; }
   .tile .label { font-size: 10.5px; color: var(--text-secondary); margin-top: 4px; }
 
+  /* ---- filter bar ---- */
   .controls {
     display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
     margin-bottom: 16px; padding: 10px 12px;
     background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
   }
-  .controls input[type="text"] {
-    flex: 1; min-width: 160px; padding: 6px 10px; border-radius: 6px;
-    border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); font-size: 13px;
+  .controls input[type="text"], .controls input[type="number"], .controls input[type="date"] {
+    padding: 6px 8px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); font-size: 12.5px;
   }
+  .controls input[type="text"] { flex: 1; min-width: 140px; }
   .controls select {
-    padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border);
-    background: var(--surface-1); color: var(--text-primary); font-size: 13px;
+    padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--surface-1); color: var(--text-primary); font-size: 12.5px;
   }
-  .controls .count { font-size: 12px; color: var(--text-muted); margin-left: auto; }
+  .controls label.mini { font-size: 10.5px; color: var(--text-muted); display: flex; flex-direction: column; gap: 3px; }
+  .controls .count { font-size: 12px; color: var(--text-muted); margin-left: auto; white-space: nowrap; }
   .filter-btn {
     padding: 5px 10px; border-radius: 6px; border: 1px solid var(--border);
     background: var(--surface-1); color: var(--text-secondary); font-size: 12px; cursor: pointer;
   }
   .filter-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
+  .btn-group { display: flex; gap: 4px; }
 
-  details.card {
-    border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px;
-    background: var(--surface-2); overflow: hidden;
+  /* ---- simulator panel ---- */
+  .sim-panel {
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 18px; margin-bottom: 16px;
   }
-  details.card[open] { background: var(--surface-1); }
-  summary.card-summary {
-    display: flex; align-items: center; gap: 10px; padding: 12px 14px;
-    cursor: pointer; list-style: none; font-size: 13px;
+  .sim-controls { display: flex; gap: 22px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 14px; }
+  .sim-controls .field { display: flex; flex-direction: column; gap: 5px; min-width: 150px; }
+  .sim-controls .field .fval { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+  .sim-controls label { font-size: 10.5px; color: var(--text-secondary); font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; }
+  .sim-controls input[type="range"] { width: 160px; }
+  .sim-controls input[type="number"] {
+    padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--surface-1); color: var(--text-primary); font-size: 13px; width: 100px;
   }
-  summary.card-summary::-webkit-details-marker { display: none; }
-  summary.card-summary .chev { color: var(--text-muted); font-size: 11px; width: 10px; }
-  details[open] summary .chev { transform: rotate(90deg); }
-  .card-match { font-weight: 600; flex: 0 0 auto; min-width: 220px; }
-  .card-leg { color: var(--text-secondary); font-size: 12px; flex: 0 0 auto; min-width: 140px; }
-  .card-edges { display: flex; gap: 14px; margin-left: auto; font-variant-numeric: tabular-nums; }
-  .card-edges .lbl { color: var(--text-muted); font-size: 10px; display: block; }
-  .card-edges .val { font-weight: 600; }
+  .sim-results { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
+  .sim-results .tile { background: var(--surface-1); }
+  .sim-results .value.good { color: var(--good); }
+  .sim-results .value.bad { color: var(--bad); }
+
+  .bucket-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 14px; }
+  .bucket-table th { text-align: right; font-weight: 500; color: var(--text-secondary); font-size: 10px; text-transform: uppercase; padding: 0 8px 6px; border-bottom: 1px solid var(--border); }
+  .bucket-table th:first-child, .bucket-table td:first-child { text-align: left; }
+  .bucket-table td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+
+  .chart-wrap { background: var(--surface-3); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px 4px; }
+  .chart-legend { display: flex; gap: 14px; font-size: 10.5px; color: var(--text-secondary); margin-bottom: 4px; }
+  .chart-legend .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 4px; }
+  .chart-legend .ln { display: inline-block; width: 12px; height: 2px; margin-right: 4px; vertical-align: middle; }
+
+  /* ---- match table ---- */
+  table.match-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .match-table th {
+    text-align: left; font-weight: 500; color: var(--text-secondary); cursor: pointer; user-select: none;
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em;
+    padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap;
+  }
+  .match-table th.num { text-align: right; }
+  .match-table th:hover { color: var(--text-primary); }
+  .match-table th .arrow { font-size: 9px; margin-left: 2px; opacity: 0.6; }
+  .match-table td { padding: 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .match-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .row-main { cursor: pointer; }
+  .row-main:hover { background: var(--surface-2); }
+  .row-detail td { background: var(--surface-2); padding: 14px 16px 18px; }
+  .match-cell .home-away { font-weight: 600; }
+  .match-cell .meta { color: var(--text-muted); font-size: 10.5px; margin-top: 2px; }
+  .bucket-badge {
+    font-size: 9.5px; font-weight: 700; padding: 2px 6px; border-radius: 4px;
+    background: var(--surface-3); color: var(--text-secondary); border: 1px solid var(--border);
+  }
+  .edge-pos { font-weight: 600; color: var(--good); }
+  .edge-neg { color: var(--bad); }
   .status-badge {
-    font-size: 10px; font-weight: 700; letter-spacing: 0.03em; padding: 2px 7px;
-    border-radius: 4px; color: white; flex: 0 0 auto;
+    font-size: 9.5px; font-weight: 700; letter-spacing: 0.03em; padding: 2px 7px;
+    border-radius: 4px; color: white; display: inline-block;
   }
   .status-open { background: var(--accent); }
   .status-won { background: var(--good); }
   .status-lost { background: var(--bad); }
   .status-push, .status-half_won, .status-half_lost { background: var(--amber); }
   .status-unsettled { background: var(--text-muted); }
+  .pnl-pos { color: var(--good); font-weight: 600; }
+  .pnl-neg { color: var(--bad); font-weight: 600; }
+  .pnl-zero { color: var(--text-muted); }
 
-  .card-body { padding: 4px 14px 16px; }
-  .mini-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 14px; }
-  .mini-summary .tile { padding: 8px 10px; }
-  .mini-summary .value { font-size: 16px; }
+  /* ---- detail panel (inside expanded row) ---- */
+  .detail-mini { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 14px; }
+  .detail-mini .tile { padding: 8px 10px; background: var(--surface-1); }
+  .detail-mini .value { font-size: 15px; }
 
-  .chart-wrap { background: var(--surface-3); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px 4px; margin-bottom: 14px; }
-  .chart-legend { display: flex; gap: 14px; font-size: 10.5px; color: var(--text-secondary); margin-bottom: 4px; }
-  .chart-legend .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 4px; }
-
-  table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  th {
-    text-align: left; font-weight: 500; color: var(--text-secondary);
-    font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em;
-    padding: 0 7px 6px; border-bottom: 1px solid var(--border);
-  }
-  th.num, td.num { text-align: right; }
-  td { padding: 6px 7px; border-bottom: 1px solid var(--border); vertical-align: top; }
-  tr.pre-entry td { opacity: 0.6; }
-  tr.row-peak td { background: color-mix(in srgb, var(--amber) 10%, transparent); }
-  tr.row-close td { background: color-mix(in srgb, var(--bad) 8%, transparent); }
-  .odds, .num.plain { font-variant-numeric: tabular-nums; color: var(--text-secondary); }
-  .edge-pos { font-weight: 600; font-variant-numeric: tabular-nums; color: var(--good); }
-  .edge-neg { font-variant-numeric: tabular-nums; color: var(--bad); }
+  .books-table { width: 100%; border-collapse: collapse; font-size: 11.5px; margin-top: 6px; }
+  .books-table th { text-align: left; font-weight: 500; color: var(--text-secondary); font-size: 9.5px; text-transform: uppercase; padding: 5px 6px; border-bottom: 1px solid var(--border); }
+  .books-table th.num, .books-table td.num { text-align: right; }
+  .books-table td { padding: 5px 6px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+  .books-table tr.pre-entry td { opacity: 0.6; }
+  .books-table tr.row-peak td { background: color-mix(in srgb, var(--amber) 10%, transparent); }
+  .books-table tr.row-close td { background: color-mix(in srgb, var(--bad) 8%, transparent); }
+  .books-table .outcome-set { white-space: nowrap; }
+  .books-table .site-hdr { font-weight: 700; color: var(--text-primary); }
   .tag {
     display: inline-block; font-size: 9px; font-weight: 700; letter-spacing: 0.02em;
     padding: 1px 5px; border-radius: 3px; margin-left: 5px; vertical-align: middle; color: white;
@@ -124,228 +162,221 @@
   .tag.entry { background: var(--accent); }
   .tag.peak { background: var(--amber); }
   .tag.close { background: var(--bad); }
-  .moved { font-size: 10px; color: var(--text-muted); }
+  .settle-src { font-size: 10px; color: var(--text-muted); }
 
   .empty { text-align: center; padding: 30px; color: var(--text-muted); font-size: 13px; }
   footer { margin-top: 16px; font-size: 11px; color: var(--text-muted); }
+  .table-scroll { overflow-x: auto; }
 </style>
 
 <div class="viz-root">
-  <h1>Value Betting — dashboard</h1>
+  <h1>Value Betting — analysis dashboard</h1>
   <p class="subtitle" id="subtitle">data/vb.sqlite</p>
 
   <div class="tiles" id="tiles"></div>
+  <div class="tiles secondary" id="tilesMethod"></div>
 
-  <div class="controls">
-    <input type="text" id="search" placeholder="Search match or competition..." />
-    <select id="statusFilter">
-      <option value="all">All statuses</option>
-      <option value="open">Open</option>
-      <option value="closed">Closed (any)</option>
-      <option value="won">Won</option>
-      <option value="lost">Lost</option>
-      <option value="unsettled">Closed, unsettled</option>
-    </select>
-    <select id="sortBy">
-      <option value="recent">Most recent</option>
-      <option value="peak">Peak edge (desc)</option>
-      <option value="entry">Entry edge (desc)</option>
-    </select>
-    <span class="count" id="count"></span>
+  <div class="section">
+    <h2>P&amp;L Simulator</h2>
+    <div class="sim-panel">
+      <div class="sim-controls">
+        <div class="field">
+          <label>Staking mode</label>
+          <div class="btn-group">
+            <button class="filter-btn active" id="modeFlat">Flat</button>
+            <button class="filter-btn" id="modeKelly">Kelly</button>
+          </div>
+        </div>
+        <div class="field" id="flatField">
+          <label>Flat stake / bet</label>
+          <input type="number" id="flatStake" value="1" min="0" step="0.5" />
+        </div>
+        <div class="field" id="kellyField" style="display:none">
+          <label>Kelly fraction <span class="fval" id="kellyFracVal">0.25</span></label>
+          <input type="range" id="kellyFrac" min="0.1" max="1" step="0.05" value="0.25" />
+        </div>
+        <div class="field">
+          <label>Betting rule</label>
+          <div class="btn-group">
+            <button class="filter-btn active" id="methodA">Method A (all flagged)</button>
+            <button class="filter-btn" id="methodB">Method B (both agree)</button>
+          </div>
+        </div>
+      </div>
+      <div class="sim-results" id="simResults"></div>
+      <table class="bucket-table" id="bucketTable"></table>
+      <div class="chart-wrap">
+        <div class="chart-legend"><span><span class="ln" style="background:#2a78d6"></span>cumulative P&amp;L (units staked)</span></div>
+        <div id="pnlChart"></div>
+      </div>
+    </div>
   </div>
 
-  <div id="list"></div>
+  <div class="section">
+    <div class="controls">
+      <input type="text" id="search" placeholder="Search match or competition..." />
+      <label class="mini">From<input type="date" id="dateFrom" /></label>
+      <label class="mini">To<input type="date" id="dateTo" /></label>
+      <select id="marketFilter">
+        <option value="all">All markets</option>
+        <option value="match_winner">Match winner</option>
+        <option value="totals">Totals</option>
+        <option value="asian_handicap">Asian handicap</option>
+      </select>
+      <select id="siteFilter">
+        <option value="all">All comparison sites</option>
+        <option value="swisslos.ch">Swisslos</option>
+        <option value="loro.ch">Loro</option>
+      </select>
+      <select id="bucketFilter">
+        <option value="all">All buckets</option>
+        <option value="favorite">Favorite (&lt;2.0)</option>
+        <option value="mid">Mid (2.0-4.0)</option>
+        <option value="longshot">Longshot (&ge;4.0)</option>
+      </select>
+      <select id="outcomeFilter">
+        <option value="all">All statuses</option>
+        <option value="open">Open</option>
+        <option value="won">Won</option>
+        <option value="lost">Lost</option>
+        <option value="push">Push</option>
+        <option value="half_won">Half won</option>
+        <option value="half_lost">Half lost</option>
+        <option value="unsettled">Closed, unsettled</option>
+      </select>
+      <input type="number" id="minEdge" placeholder="Min entry edge %" step="0.5" style="width:130px" />
+      <span class="count" id="count"></span>
+    </div>
+  </div>
+
+  <div class="section table-scroll">
+    <table class="match-table" id="matchTable">
+      <thead>
+        <tr>
+          <th data-sort="match">Match</th>
+          <th data-sort="bucket">Bucket</th>
+          <th class="num" data-sort="entryEdgeA">Entry A</th>
+          <th class="num" data-sort="entryEdgeB">Entry B</th>
+          <th class="num" data-sort="peakEdgeA">Peak</th>
+          <th data-sort="kickoff">Kickoff</th>
+          <th class="num" data-sort="convergence">Converge</th>
+          <th>Result</th>
+          <th class="num" data-sort="pnl">P&amp;L</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+
   <footer id="footer"></footer>
 </div>
 
 <script>
 const DATA = __DASHBOARD_DATA__;
+const THRESHOLD = 0.03; // mirrors vb.opportunity.THRESHOLD
 
+// ============================================================
+// Flat / fractional-Kelly staking math, ported 1:1 from vb/evaluation.py
+// ============================================================
+const PROFIT_MULTIPLIER = { won: 1.0, lost: -1.0, push: 0.0, half_won: 0.5, half_lost: -0.5 };
+
+function flatStakeProfit(outcome, odds, stake) {
+  if (outcome === 'won' || outcome === 'half_won') {
+    return PROFIT_MULTIPLIER[outcome] * stake * (odds - 1);
+  }
+  return PROFIT_MULTIPLIER[outcome] * stake;
+}
+function kellyStakeFraction(edge, odds, kellyFraction) {
+  if (odds <= 1.0) return 0.0;
+  const fullKelly = edge / (odds - 1.0);
+  return Math.max(0.0, fullKelly * kellyFraction);
+}
+function kellyStakeProfit(outcome, odds, edge, kellyFraction) {
+  return flatStakeProfit(outcome, odds, kellyStakeFraction(edge, odds, kellyFraction));
+}
+function isWinCredit(outcome) {
+  if (outcome === 'push') return null;
+  return { won: 1.0, lost: 0.0, half_won: 0.75, half_lost: 0.25 }[outcome];
+}
+
+// ============================================================
+// Formatting helpers
+// ============================================================
 function pct(x) { return (x * 100).toFixed(1) + '%'; }
 function edgeClass(x) { return x >= 0 ? 'edge-pos' : 'edge-neg'; }
-function fmtTime(iso) {
-  const d = new Date(iso);
-  return d.toISOString().slice(11, 19) + ' UTC';
-}
+function fmtTime(iso) { return new Date(iso).toISOString().slice(11, 19) + ' UTC'; }
+function fmtDate(iso) { return new Date(iso).toISOString().slice(0, 10); }
 function fmtDuration(seconds) {
   if (seconds === null || seconds === undefined) return null;
   const m = Math.round(seconds / 60);
   if (m < 60) return m + ' min';
   return Math.floor(m / 60) + 'h ' + (m % 60) + 'min';
 }
-
+function fmtOutcomes(outcomes) {
+  if (!outcomes || !outcomes.length) return '—';
+  return outcomes.map(o => `${o.selection[0].toUpperCase()}${o.selection.slice(1,3)} ${o.odds}`).join('  ');
+}
+function siteLabel(site) {
+  return { 'pinnacle.com': 'Pinnacle', 'swisslos.ch': 'Swisslos', 'loro.ch': 'Loro' }[site] || site;
+}
 function statusOf(opp) {
   if (opp.isOpen) return { key: 'open', label: 'OPEN' };
-  if (opp.outcome === 'won' || opp.outcome === 'half_won') return { key: 'won', label: opp.outcome === 'half_won' ? 'HALF WON' : 'WON' };
-  if (opp.outcome === 'lost' || opp.outcome === 'half_lost') return { key: 'lost', label: opp.outcome === 'half_lost' ? 'HALF LOST' : 'LOST' };
+  if (opp.outcome === 'won' || opp.outcome === 'half_won') return { key: opp.outcome, label: opp.outcome === 'half_won' ? 'HALF WON' : 'WON' };
+  if (opp.outcome === 'lost' || opp.outcome === 'half_lost') return { key: opp.outcome, label: opp.outcome === 'half_lost' ? 'HALF LOST' : 'LOST' };
   if (opp.outcome === 'push') return { key: 'push', label: 'PUSH' };
   return { key: 'unsettled', label: 'CLOSED' };
 }
 
-function movementLabel(prev, cur) {
-  if (!prev) return 'first reading';
-  const bmMoved = Math.abs(prev.benchmarkOdds - cur.benchmarkOdds) > 1e-6;
-  const cmpMoved = Math.abs(prev.comparisonOdds - cur.comparisonOdds) > 1e-6;
-  if (bmMoved && cmpMoved) return 'both moved';
-  if (bmMoved) return 'benchmark moved';
-  if (cmpMoved) return 'comparison moved';
-  return 'no change';
+// A leg "counts" for Method B (both methods agree) if its entry edge B
+// also cleared the threshold - same filter vb.evaluation.evaluate() uses.
+function methodBAgrees(opp) { return opp.entryEdgeB >= THRESHOLD; }
+
+function legPnl(opp, method, mode, flatStake, kellyFraction) {
+  if (!opp.outcome) return null;
+  const edge = method === 'b' ? opp.entryEdgeB : opp.entryEdgeA;
+  const odds = opp.entryComparisonOdds;
+  if (mode === 'kelly') return kellyStakeProfit(opp.outcome, odds, edge, kellyFraction);
+  return flatStakeProfit(opp.outcome, odds, flatStake);
 }
 
-function buildChartSVG(points) {
-  if (points.length === 0) return '<p class="moved">No trajectory data.</p>';
-  const edges = points.map(p => p.edgeA * 100);
-  let min = Math.min(0, ...edges);
-  let max = Math.max(3, ...edges);
-  const pad = Math.max((max - min) * 0.12, 1);
-  min -= pad; max += pad;
+// ============================================================
+// Filter + simulator state
+// ============================================================
+const state = {
+  search: '', dateFrom: null, dateTo: null,
+  market: 'all', site: 'all', bucket: 'all', outcome: 'all', minEdge: null,
+  method: 'a', mode: 'flat', flatStake: 1.0, kellyFraction: 0.25,
+  sortKey: 'kickoff', sortDir: 'desc',
+};
 
-  const x0 = 45, x1 = 700, yTop = 10, yBot = 170;
-  const xFor = i => points.length <= 1 ? (x0 + x1) / 2 : x0 + (x1 - x0) * i / (points.length - 1);
-  const yFor = e => yTop + (max - e) / (max - min) * (yBot - yTop);
-
-  const zeroY = yFor(0), threeY = yFor(3);
-  let svg = '';
-  if (min < 0) svg += `<line x1="${x0}" y1="${zeroY}" x2="${x1}" y2="${zeroY}" stroke="#85837c" stroke-width="1" stroke-dasharray="2,3"/><text x="${x1+2}" y="${zeroY+4}" font-size="9" fill="#85837c">0%</text>`;
-  if (max >= 3) svg += `<line x1="${x0}" y1="${threeY}" x2="${x1}" y2="${threeY}" stroke="#eda100" stroke-width="1.5" stroke-dasharray="4,3"/><text x="${x1+2}" y="${threeY+4}" font-size="9" fill="#85837c">3%</text>`;
-  svg += `<line x1="${x0}" y1="10" x2="${x0}" y2="${yBot}" stroke="#e4e2dc" stroke-width="1"/><line x1="${x0}" y1="${yBot}" x2="${x1}" y2="${yBot}" stroke="#e4e2dc" stroke-width="1"/>`;
-  svg += `<text x="${x0-6}" y="14" font-size="9" fill="#85837c" text-anchor="end">${max.toFixed(0)}%</text>`;
-  svg += `<text x="${x0-6}" y="${yBot}" font-size="9" fill="#85837c" text-anchor="end">${min.toFixed(0)}%</text>`;
-
-  const poly = points.map((p, i) => `${xFor(i).toFixed(1)},${yFor(p.edgeA * 100).toFixed(1)}`).join(' ');
-  svg += `<polyline points="${poly}" fill="none" stroke="#2a78d6" stroke-width="2.2"/>`;
-
-  points.forEach((p, i) => {
-    const x = xFor(i), y = yFor(p.edgeA * 100);
-    let r = 3, fill = p.isPre ? '#85837c' : '#2a78d6', stroke = 'none', sw = 0;
-    if (p.isEntry) { r = 4.5; }
-    if (p.isPeak) { r = 5; fill = '#eda100'; stroke = '#2a78d6'; sw = 1.5; }
-    if (p.isClose) { r = 5; fill = '#e34948'; stroke = '#2a78d6'; sw = 1.5; }
-    svg += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r}" fill="${fill}" ${stroke !== 'none' ? `stroke="${stroke}" stroke-width="${sw}"` : ''}/>`;
-  });
-
-  return `<svg viewBox="0 0 720 190" width="100%" style="overflow:visible">${svg}</svg>`;
-}
-
-function buildTable(opp) {
-  const preRows = opp.preEntry.map((h, i) => {
-    const prev = i > 0 ? opp.preEntry[i - 1] : null;
-    return `<tr class="pre-entry">
-      <td class="odds">${fmtTime(h.capturedAt)}</td>
-      <td class="num odds">${h.benchmarkOdds}</td>
-      <td class="num odds">${h.comparisonOdds}</td>
-      <td class="num ${edgeClass(h.edgeA)}">${pct(h.edgeA)}</td>
-      <td class="num odds">—</td>
-      <td class="moved">${movementLabel(prev, h)} (below threshold)</td>
-    </tr>`;
-  }).join('');
-
-  const peakIdx = opp.snapshots.reduce((best, s, i) => s.edgeA > opp.snapshots[best].edgeA ? i : best, 0);
-  const lastPre = opp.preEntry.length ? opp.preEntry[opp.preEntry.length - 1] : null;
-
-  const snapRows = opp.snapshots.map((s, i) => {
-    const isEntry = i === 0;
-    const isPeak = i === peakIdx && opp.snapshots.length > 1;
-    const isClose = i === opp.snapshots.length - 1 && !opp.isOpen;
-    const prev = i > 0 ? opp.snapshots[i - 1] : lastPre;
-    let cls = '';
-    if (isPeak) cls = 'row-peak'; else if (isClose) cls = 'row-close';
-    const tags = [isEntry ? '<span class="tag entry">ENTRY</span>' : '', isPeak ? '<span class="tag peak">PEAK</span>' : '', isClose ? '<span class="tag close">CLOSED</span>' : ''].join('');
-    const moveNote = isClose && opp.resolutionReason === 'event_started' ? 'kickoff' : (isClose && opp.resolutionReason === 'market_suspended' ? 'market suspended' : movementLabel(prev, s));
-    return `<tr class="${cls}">
-      <td class="odds">${fmtTime(s.capturedAt)}${tags}</td>
-      <td class="num odds">${s.benchmarkOdds}</td>
-      <td class="num odds">${s.comparisonOdds}</td>
-      <td class="num ${edgeClass(s.edgeA)}">${pct(s.edgeA)}</td>
-      <td class="num ${edgeClass(s.edgeB)}">${pct(s.edgeB)}</td>
-      <td class="moved">${moveNote}</td>
-    </tr>`;
-  }).join('');
-
-  return `<table>
-    <thead><tr><th>Time</th><th class="num">Benchmark</th><th class="num">Comparison</th><th class="num">Edge (raw)</th><th class="num">Edge (de-vig)</th><th>What moved</th></tr></thead>
-    <tbody>${preRows}${snapRows}</tbody>
-  </table>`;
-}
-
-function buildCard(opp) {
-  const status = statusOf(opp);
-  const lineStr = opp.line !== null ? ' ' + opp.line : '';
-  const legDesc = `${opp.marketType.replace('_', ' ')}${lineStr} · ${opp.selection}`;
-  const convergence = fmtDuration(opp.convergenceSeconds);
-
-  const chartPoints = [
-    ...opp.preEntry.map(h => ({ edgeA: h.edgeA, isPre: true })),
-    ...opp.snapshots.map((s, i, arr) => ({
-      edgeA: s.edgeA,
-      isEntry: i === 0,
-      isPeak: i === arr.reduce((best, x, j) => x.edgeA > arr[best].edgeA ? j : best, 0) && arr.length > 1,
-      isClose: i === arr.length - 1 && !opp.isOpen,
-    })),
-  ];
-
-  const resultLine = opp.outcome
-    ? `${opp.home} ${opp.homeGoals}–${opp.awayGoals} ${opp.away}`
-    : (opp.isOpen ? 'match not finished yet' : 'closed, result not recorded');
-
-  return `<details class="card">
-    <summary class="card-summary">
-      <span class="chev">▶</span>
-      <span class="card-match">${opp.home} vs ${opp.away}</span>
-      <span class="card-leg">${legDesc}<br><span style="opacity:0.7">vs. ${opp.comparisonSite}</span></span>
-      <span class="card-edges">
-        <span><span class="lbl">entry</span><span class="val ${edgeClass(opp.entryEdgeA)}">${pct(opp.entryEdgeA)}</span></span>
-        <span><span class="lbl">peak</span><span class="val ${edgeClass(opp.peakEdgeA)}">${pct(opp.peakEdgeA)}</span></span>
-      </span>
-      <span class="status-badge status-${status.key}">${status.label}</span>
-    </summary>
-    <div class="card-body">
-      <div class="mini-summary">
-        <div class="tile"><div class="value ${edgeClass(opp.entryEdgeA)}">${pct(opp.entryEdgeA)}</div><div class="label">entry edge</div></div>
-        <div class="tile"><div class="value ${edgeClass(opp.peakEdgeA)}">${pct(opp.peakEdgeA)}</div><div class="label">peak edge</div></div>
-        <div class="tile"><div class="value">${convergence || (opp.isOpen ? 'still open' : 'n/a')}</div><div class="label">time to converge</div></div>
-        <div class="tile"><div class="value">${resultLine}</div><div class="label">${opp.competition}</div></div>
-      </div>
-      <div class="chart-wrap">
-        <div class="chart-legend">
-          <span><span class="dot" style="background:#2a78d6"></span>edge (raw)</span>
-          <span><span class="dot" style="background:#85837c"></span>pre-entry (below threshold)</span>
-          <span><span class="dot" style="background:#eda100"></span>peak</span>
-          <span><span class="dot" style="background:#e34948"></span>close</span>
-        </div>
-        ${buildChartSVG(chartPoints)}
-      </div>
-      ${buildTable(opp)}
-    </div>
-  </details>`;
-}
-
-function render() {
-  const q = document.getElementById('search').value.trim().toLowerCase();
-  const statusF = document.getElementById('statusFilter').value;
-  const sortBy = document.getElementById('sortBy').value;
-
-  let items = DATA.opportunities.filter(opp => {
-    if (q) {
-      const hay = `${opp.home} ${opp.away} ${opp.competition}`.toLowerCase();
-      if (!hay.includes(q)) return false;
-    }
-    if (statusF === 'all') return true;
+function passesFilters(opp) {
+  if (state.search) {
+    const hay = `${opp.home} ${opp.away} ${opp.competition}`.toLowerCase();
+    if (!hay.includes(state.search)) return false;
+  }
+  if (state.dateFrom && opp.kickoffUtc < state.dateFrom) return false;
+  if (state.dateTo && opp.kickoffUtc > state.dateTo + 'T23:59:59') return false;
+  if (state.market !== 'all' && opp.marketType !== state.market) return false;
+  if (state.site !== 'all' && opp.comparisonSite !== state.site) return false;
+  if (state.bucket !== 'all' && opp.bucket !== state.bucket) return false;
+  if (state.outcome !== 'all') {
     const s = statusOf(opp).key;
-    if (statusF === 'closed') return !opp.isOpen;
-    return s === statusF;
-  });
-
-  if (sortBy === 'peak') items = items.slice().sort((a, b) => b.peakEdgeA - a.peakEdgeA);
-  else if (sortBy === 'entry') items = items.slice().sort((a, b) => b.entryEdgeA - a.entryEdgeA);
-  else items = items.slice().sort((a, b) => new Date(b.firstCrossAt) - new Date(a.firstCrossAt));
-
-  document.getElementById('count').textContent = `${items.length} of ${DATA.opportunities.length}`;
-  document.getElementById('list').innerHTML = items.length
-    ? items.map(buildCard).join('')
-    : '<div class="empty">No opportunities match this filter.</div>';
+    if (state.outcome === 'unsettled') { if (!(!opp.isOpen && !opp.outcome)) return false; }
+    else if (s !== state.outcome) return false;
+  }
+  const relevantEdge = state.method === 'b' ? opp.entryEdgeB : opp.entryEdgeA;
+  if (state.minEdge !== null && relevantEdge * 100 < state.minEdge) return false;
+  if (state.method === 'b' && !methodBAgrees(opp)) return false;
+  return true;
 }
 
+function filteredOpportunities() {
+  return DATA.opportunities.filter(passesFilters);
+}
+
+// ============================================================
+// Summary tiles
+// ============================================================
 function renderTiles() {
   const s = DATA.stats;
   document.getElementById('tiles').innerHTML = `
@@ -353,15 +384,358 @@ function renderTiles() {
     <div class="tile"><div class="value">${s.oddsSnapshots.toLocaleString()}</div><div class="label">odds snapshots</div></div>
     <div class="tile"><div class="value">${s.liveOpportunities}</div><div class="label">live opportunities</div></div>
     <div class="tile"><div class="value">${s.resolvedOpportunities}</div><div class="label">resolved opportunities</div></div>
-    <div class="tile"><div class="value">${s.pendingReviews}</div><div class="label">pending review</div></div>
+  `;
+
+  const settled = DATA.opportunities.filter(o => o.outcome);
+  const bAgrees = settled.filter(methodBAgrees);
+  const statsFor = (legs, method) => {
+    const wins = legs.map(l => isWinCredit(l.outcome)).filter(v => v !== null);
+    const hitRate = wins.length ? wins.reduce((a,b) => a+b, 0) / wins.length : null;
+    const profit = legs.reduce((sum, l) => sum + flatStakeProfit(l.outcome, l.entryComparisonOdds, 1.0), 0);
+    const roi = legs.length ? profit / legs.length : 0;
+    return { n: legs.length, hitRate, roi };
+  };
+  const a = statsFor(settled, 'a'), b = statsFor(bAgrees, 'b');
+  document.getElementById('tilesMethod').innerHTML = `
+    <div class="tile"><div class="value">${a.n} / ${a.hitRate !== null ? (a.hitRate*100).toFixed(0)+'%' : 'n/a'}</div><div class="label">Method A: settled bets / hit rate</div></div>
+    <div class="tile"><div class="value ${a.roi >= 0 ? 'edge-pos' : 'edge-neg'}">${pct(a.roi)}</div><div class="label">Method A: flat ROI</div></div>
+    <div class="tile"><div class="value">${b.n} / ${b.hitRate !== null ? (b.hitRate*100).toFixed(0)+'%' : 'n/a'}</div><div class="label">Method B agrees: settled bets / hit rate</div></div>
+    <div class="tile"><div class="value ${b.roi >= 0 ? 'edge-pos' : 'edge-neg'}">${pct(b.roi)}</div><div class="label">Method B agrees: flat ROI</div></div>
   `;
 }
 
-document.getElementById('search').addEventListener('input', render);
-document.getElementById('statusFilter').addEventListener('change', render);
-document.getElementById('sortBy').addEventListener('change', render);
+// ============================================================
+// Simulator
+// ============================================================
+function buildPnlChartSVG(points) {
+  if (points.length === 0) return '<p style="font-size:11px;color:var(--text-muted)">No settled bets in this filter.</p>';
+  let cum = 0;
+  const cumPoints = points.map(p => { cum += p.pnl; return cum; });
+  let min = Math.min(0, ...cumPoints), max = Math.max(0, ...cumPoints);
+  const pad = Math.max((max - min) * 0.12, 0.5);
+  min -= pad; max += pad;
+
+  const x0 = 45, x1 = 1080, yTop = 10, yBot = 150;
+  const xFor = i => cumPoints.length <= 1 ? (x0+x1)/2 : x0 + (x1-x0) * i / (cumPoints.length-1);
+  const yFor = v => yTop + (max-v) / (max-min) * (yBot-yTop);
+  const zeroY = yFor(0);
+
+  let svg = `<line x1="${x0}" y1="${zeroY}" x2="${x1}" y2="${zeroY}" stroke="#85837c" stroke-width="1" stroke-dasharray="2,3"/>`;
+  svg += `<line x1="${x0}" y1="10" x2="${x0}" y2="${yBot}" stroke="#e4e2dc" stroke-width="1"/><line x1="${x0}" y1="${yBot}" x2="${x1}" y2="${yBot}" stroke="#e4e2dc" stroke-width="1"/>`;
+  svg += `<text x="${x0-6}" y="14" font-size="9" fill="#85837c" text-anchor="end">${max.toFixed(1)}u</text>`;
+  svg += `<text x="${x0-6}" y="${yBot}" font-size="9" fill="#85837c" text-anchor="end">${min.toFixed(1)}u</text>`;
+
+  const poly = cumPoints.map((v, i) => `${xFor(i).toFixed(1)},${yFor(v).toFixed(1)}`).join(' ');
+  const finalColor = cum >= 0 ? '#008300' : '#e34948';
+  svg += `<polyline points="${poly}" fill="none" stroke="${finalColor}" stroke-width="2"/>`;
+  return `<svg viewBox="0 0 1100 165" width="100%" style="overflow:visible">${svg}</svg>`;
+}
+
+function renderSimulator(items) {
+  const settled = items.filter(o => o.outcome).filter(o => state.method === 'a' || methodBAgrees(o));
+  const sorted = settled.slice().sort((a, b) => new Date(a.kickoffUtc) - new Date(b.kickoffUtc));
+
+  const legPnlOf = (o) => legPnl(o, state.method, state.mode, state.flatStake, state.kellyFraction);
+  const legStakeOf = (o) => {
+    if (state.mode === 'flat') return state.flatStake;
+    const edge = state.method === 'b' ? o.entryEdgeB : o.entryEdgeA;
+    return kellyStakeFraction(edge, o.entryComparisonOdds, state.kellyFraction);
+  };
+
+  const totalStaked = sorted.reduce((s, o) => s + legStakeOf(o), 0);
+  const totalProfit = sorted.reduce((s, o) => s + legPnlOf(o), 0);
+  const roi = totalStaked ? totalProfit / totalStaked : 0;
+  const wins = sorted.map(o => isWinCredit(o.outcome)).filter(v => v !== null);
+  const hitRate = wins.length ? wins.reduce((a,b)=>a+b,0) / wins.length : null;
+
+  document.getElementById('simResults').innerHTML = `
+    <div class="tile"><div class="value">${sorted.length}</div><div class="label">settled bets (this filter)</div></div>
+    <div class="tile"><div class="value">${hitRate !== null ? (hitRate*100).toFixed(1)+'%' : 'n/a'}</div><div class="label">hit rate</div></div>
+    <div class="tile"><div class="value ${roi >= 0 ? 'good' : 'bad'}">${pct(roi)}</div><div class="label">ROI (profit / staked)</div></div>
+    <div class="tile"><div class="value ${totalProfit >= 0 ? 'good' : 'bad'}">${totalProfit >= 0 ? '+' : ''}${totalProfit.toFixed(2)}u</div><div class="label">total profit (staked ${totalStaked.toFixed(2)}u)</div></div>
+  `;
+
+  const buckets = ['favorite', 'mid', 'longshot'];
+  const bucketLabel = { favorite: 'Favorite (<2.0)', mid: 'Mid (2.0-4.0)', longshot: 'Longshot (>=4.0)' };
+  let rows = '<thead><tr><th>Bucket</th><th>N</th><th>Hit rate</th><th>ROI</th><th>Profit</th></tr></thead><tbody>';
+  buckets.forEach(b => {
+    const legs = sorted.filter(o => o.bucket === b);
+    const staked = legs.reduce((s,o) => s + legStakeOf(o), 0);
+    const profit = legs.reduce((s,o) => s + legPnlOf(o), 0);
+    const bwins = legs.map(o => isWinCredit(o.outcome)).filter(v => v !== null);
+    const bHit = bwins.length ? bwins.reduce((a,x)=>a+x,0)/bwins.length : null;
+    const bRoi = staked ? profit / staked : 0;
+    rows += `<tr><td>${bucketLabel[b]}</td><td>${legs.length}</td><td>${bHit !== null ? (bHit*100).toFixed(0)+'%' : 'n/a'}</td>
+      <td class="${bRoi >= 0 ? 'edge-pos' : 'edge-neg'}">${pct(bRoi)}</td><td class="${profit >= 0 ? 'edge-pos' : 'edge-neg'}">${profit >= 0 ? '+' : ''}${profit.toFixed(2)}u</td></tr>`;
+  });
+  rows += '</tbody>';
+  document.getElementById('bucketTable').innerHTML = rows;
+
+  const chartPoints = sorted.map(o => ({ pnl: legPnlOf(o) }));
+  document.getElementById('pnlChart').innerHTML = buildPnlChartSVG(chartPoints);
+}
+
+// ============================================================
+// All-books detail (per opportunity, expanded row)
+// ============================================================
+function movementLabel(prevBooks, curBooks, sites) {
+  if (!prevBooks) return 'first reading';
+  const moved = sites.filter(s => {
+    const p = prevBooks[s], c = curBooks[s];
+    if (!p || !c || !p.length || !c.length) return false;
+    return JSON.stringify(p) !== JSON.stringify(c);
+  });
+  if (!moved.length) return 'no change';
+  return moved.map(siteLabel).join(' + ') + ' moved';
+}
+
+function buildEdgeChartSVG(points) {
+  if (points.length === 0) return '<p style="font-size:11px;color:var(--text-muted)">No trajectory data.</p>';
+  const allEdges = points.flatMap(p => [p.edgeA * 100, p.edgeB !== null && p.edgeB !== undefined ? p.edgeB * 100 : p.edgeA * 100]);
+  let min = Math.min(0, ...allEdges), max = Math.max(3, ...allEdges);
+  const pad = Math.max((max - min) * 0.12, 1);
+  min -= pad; max += pad;
+
+  const x0 = 45, x1 = 700, yTop = 10, yBot = 170;
+  const xFor = i => points.length <= 1 ? (x0+x1)/2 : x0 + (x1-x0) * i / (points.length-1);
+  const yFor = e => yTop + (max-e) / (max-min) * (yBot-yTop);
+  const zeroY = yFor(0), threeY = yFor(3);
+
+  let svg = '';
+  if (min < 0) svg += `<line x1="${x0}" y1="${zeroY}" x2="${x1}" y2="${zeroY}" stroke="#85837c" stroke-width="1" stroke-dasharray="2,3"/><text x="${x1+2}" y="${zeroY+4}" font-size="9" fill="#85837c">0%</text>`;
+  if (max >= 3) svg += `<line x1="${x0}" y1="${threeY}" x2="${x1}" y2="${threeY}" stroke="#eda100" stroke-width="1.5" stroke-dasharray="4,3"/><text x="${x1+2}" y="${threeY+4}" font-size="9" fill="#85837c">3%</text>`;
+  svg += `<line x1="${x0}" y1="10" x2="${x0}" y2="${yBot}" stroke="#e4e2dc" stroke-width="1"/><line x1="${x0}" y1="${yBot}" x2="${x1}" y2="${yBot}" stroke="#e4e2dc" stroke-width="1"/>`;
+  svg += `<text x="${x0-6}" y="14" font-size="9" fill="#85837c" text-anchor="end">${max.toFixed(0)}%</text>`;
+  svg += `<text x="${x0-6}" y="${yBot}" font-size="9" fill="#85837c" text-anchor="end">${min.toFixed(0)}%</text>`;
+
+  const polyA = points.map((p,i) => `${xFor(i).toFixed(1)},${yFor(p.edgeA*100).toFixed(1)}`).join(' ');
+  svg += `<polyline points="${polyA}" fill="none" stroke="#2a78d6" stroke-width="2.2"/>`;
+  const bPoints = points.filter(p => p.edgeB !== null && p.edgeB !== undefined);
+  if (bPoints.length) {
+    const polyB = points.map((p,i) => p.edgeB !== null && p.edgeB !== undefined ? `${xFor(i).toFixed(1)},${yFor(p.edgeB*100).toFixed(1)}` : null).filter(Boolean).join(' ');
+    svg += `<polyline points="${polyB}" fill="none" stroke="#8a5cf5" stroke-width="2" stroke-dasharray="5,3"/>`;
+  }
+
+  points.forEach((p, i) => {
+    const x = xFor(i), y = yFor(p.edgeA * 100);
+    let r = 3, fill = p.isPre ? '#85837c' : '#2a78d6', stroke = 'none', sw = 0;
+    if (p.isEntry) r = 4.5;
+    if (p.isPeak) { r = 5; fill = '#eda100'; stroke = '#2a78d6'; sw = 1.5; }
+    if (p.isClose) { r = 5; fill = '#e34948'; stroke = '#2a78d6'; sw = 1.5; }
+    svg += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r}" fill="${fill}" ${stroke !== 'none' ? `stroke="${stroke}" stroke-width="${sw}"` : ''}/>`;
+  });
+  return `<svg viewBox="0 0 720 190" width="100%" style="overflow:visible">${svg}</svg>`;
+}
+
+function buildBooksTable(opp) {
+  const sites = [opp.benchmarkSite, opp.comparisonSite, opp.thirdSite];
+  const allRows = [
+    ...opp.preEntry.map(h => ({ ...h, isPre: true })),
+    ...opp.snapshots.map(s => ({ ...s, isPre: false })),
+  ];
+  const peakIdx = opp.snapshots.length ? opp.snapshots.reduce((best, s, i) => s.edgeA > opp.snapshots[best].edgeA ? i : best, 0) : -1;
+
+  let head = `<tr><th>Time</th>${sites.map(s => `<th class="outcome-set site-hdr">${siteLabel(s)}</th>`).join('')}<th class="num">Edge A</th><th class="num">Edge B</th><th>What moved</th></tr>`;
+  let body = '';
+  allRows.forEach((r, idx) => {
+    const isPre = r.isPre;
+    const snapIdx = isPre ? -1 : idx - opp.preEntry.length;
+    const isEntry = !isPre && snapIdx === 0;
+    const isPeak = !isPre && snapIdx === peakIdx && opp.snapshots.length > 1;
+    const isClose = !isPre && snapIdx === opp.snapshots.length - 1 && !opp.isOpen;
+    let cls = isPre ? 'pre-entry' : (isPeak ? 'row-peak' : (isClose ? 'row-close' : ''));
+    const tags = [isEntry ? '<span class="tag entry">ENTRY</span>' : '', isPeak ? '<span class="tag peak">PEAK</span>' : '', isClose ? '<span class="tag close">CLOSED</span>' : ''].join('');
+    const prevBooks = idx > 0 ? allRows[idx-1].books : null;
+    const moveNote = isPre ? 'below threshold' : movementLabel(prevBooks, r.books, sites);
+    const edgeB = r.edgeB !== undefined ? r.edgeB : null;
+    body += `<tr class="${cls}">
+      <td>${fmtTime(r.capturedAt)}${tags}</td>
+      ${sites.map(s => `<td class="outcome-set">${fmtOutcomes((r.books || {})[s])}</td>`).join('')}
+      <td class="num ${edgeClass(r.edgeA)}">${pct(r.edgeA)}</td>
+      <td class="num">${edgeB !== null ? pct(edgeB) : '—'}</td>
+      <td class="settle-src">${moveNote}</td>
+    </tr>`;
+  });
+  return `<table class="books-table">${head}<tbody>${body}</tbody></table>`;
+}
+
+function buildDetailRow(opp) {
+  const chartPoints = [
+    ...opp.preEntry.map(h => ({ edgeA: h.edgeA, edgeB: null, isPre: true })),
+    ...opp.snapshots.map((s, i, arr) => ({
+      edgeA: s.edgeA, edgeB: s.edgeB,
+      isEntry: i === 0,
+      isPeak: i === arr.reduce((best,x,j) => x.edgeA > arr[best].edgeA ? j : best, 0) && arr.length > 1,
+      isClose: i === arr.length - 1 && !opp.isOpen,
+    })),
+  ];
+  const resultLine = opp.outcome ? `${opp.home} ${opp.homeGoals}–${opp.awayGoals} ${opp.away}` : (opp.isOpen ? 'match not finished yet' : 'closed, result not recorded');
+  const convergence = fmtDuration(opp.convergenceSeconds);
+  const sourceNote = opp.settledSource ? ` <span class="settle-src">(settled via ${opp.settledSource === 'auto:espn' ? 'ESPN auto-settle' : opp.settledSource})</span>` : '';
+
+  return `
+    <div class="detail-mini">
+      <div class="tile"><div class="value ${edgeClass(opp.entryEdgeA)}">${pct(opp.entryEdgeA)}</div><div class="label">entry edge A</div></div>
+      <div class="tile"><div class="value ${edgeClass(opp.entryEdgeB)}">${pct(opp.entryEdgeB)}</div><div class="label">entry edge B</div></div>
+      <div class="tile"><div class="value">${convergence || (opp.isOpen ? 'still open' : 'n/a')}</div><div class="label">time to converge</div></div>
+      <div class="tile"><div class="value">${resultLine}${sourceNote}</div><div class="label">${opp.competition}</div></div>
+    </div>
+    <div class="chart-wrap">
+      <div class="chart-legend">
+        <span><span class="ln" style="background:#2a78d6"></span>edge A (raw)</span>
+        <span><span class="ln" style="background:#8a5cf5;border-top:2px dashed #8a5cf5;height:0"></span>edge B (de-vigged)</span>
+        <span><span class="dot" style="background:#85837c"></span>pre-entry</span>
+        <span><span class="dot" style="background:#eda100"></span>peak</span>
+        <span><span class="dot" style="background:#e34948"></span>close</span>
+      </div>
+      ${buildEdgeChartSVG(chartPoints)}
+    </div>
+    ${buildBooksTable(opp)}
+  `;
+}
+
+// ============================================================
+// Match table
+// ============================================================
+function sortValue(opp, key) {
+  switch (key) {
+    case 'match': return `${opp.home} ${opp.away}`;
+    case 'bucket': return opp.bucket;
+    case 'entryEdgeA': return opp.entryEdgeA;
+    case 'entryEdgeB': return opp.entryEdgeB;
+    case 'peakEdgeA': return opp.peakEdgeA;
+    case 'kickoff': return new Date(opp.kickoffUtc).getTime();
+    case 'convergence': return opp.convergenceSeconds !== null && opp.convergenceSeconds !== undefined ? opp.convergenceSeconds : -Infinity;
+    case 'pnl': return legPnl(opp, state.method, state.mode, state.flatStake, state.kellyFraction) ?? -Infinity;
+    default: return 0;
+  }
+}
+
+function renderTable(items) {
+  const sorted = items.slice().sort((a, b) => {
+    const av = sortValue(a, state.sortKey), bv = sortValue(b, state.sortKey);
+    const cmp = av < bv ? -1 : av > bv ? 1 : 0;
+    return state.sortDir === 'asc' ? cmp : -cmp;
+  });
+
+  document.getElementById('count').textContent = `${sorted.length} of ${DATA.opportunities.length}`;
+
+  if (!sorted.length) {
+    document.getElementById('tbody').innerHTML = `<tr><td colspan="9" class="empty">No opportunities match this filter.</td></tr>`;
+    return;
+  }
+
+  const rows = sorted.map((opp, i) => {
+    const status = statusOf(opp);
+    const lineStr = opp.line !== null ? ' ' + opp.line : '';
+    const legDesc = `${opp.marketType.replace('_',' ')}${lineStr} · ${opp.selection} · vs. ${siteLabel(opp.comparisonSite)}`;
+    const pnl = legPnl(opp, state.method, state.mode, state.flatStake, state.kellyFraction);
+    const pnlStr = pnl === null ? '—' : `${pnl >= 0 ? '+' : ''}${pnl.toFixed(3)}u`;
+    const pnlCls = pnl === null ? '' : (pnl > 0 ? 'pnl-pos' : pnl < 0 ? 'pnl-neg' : 'pnl-zero');
+    return `
+      <tr class="row-main" data-idx="${i}">
+        <td class="match-cell"><div class="home-away">${opp.home} vs ${opp.away}</div><div class="meta">${legDesc}</div></td>
+        <td><span class="bucket-badge">${opp.bucket}</span></td>
+        <td class="num ${edgeClass(opp.entryEdgeA)}">${pct(opp.entryEdgeA)}</td>
+        <td class="num ${edgeClass(opp.entryEdgeB)}">${pct(opp.entryEdgeB)}</td>
+        <td class="num ${edgeClass(opp.peakEdgeA)}">${pct(opp.peakEdgeA)}</td>
+        <td>${fmtDate(opp.kickoffUtc)}</td>
+        <td class="num">${fmtDuration(opp.convergenceSeconds) || '—'}</td>
+        <td><span class="status-badge status-${status.key}">${status.label}</span></td>
+        <td class="num ${pnlCls}">${pnlStr}</td>
+      </tr>
+      <tr class="row-detail" id="detail-${i}" hidden><td colspan="9"></td></tr>
+    `;
+  }).join('');
+  document.getElementById('tbody').innerHTML = rows;
+
+  document.querySelectorAll('.row-main').forEach(tr => {
+    tr.addEventListener('click', () => {
+      const idx = tr.dataset.idx;
+      const detailRow = document.getElementById(`detail-${idx}`);
+      const wasHidden = detailRow.hidden;
+      detailRow.hidden = !wasHidden;
+      if (wasHidden && !detailRow.dataset.built) {
+        detailRow.querySelector('td').innerHTML = buildDetailRow(sorted[idx]);
+        detailRow.dataset.built = '1';
+      }
+    });
+  });
+
+  document.querySelectorAll('.match-table th[data-sort]').forEach(th => {
+    // th.dataset.label caches the original text on first render - re-deriving
+    // it from th.textContent on later renders would pick up the previous
+    // render's arrow span too, growing a new arrow on every re-render.
+    if (!th.dataset.label) th.dataset.label = th.textContent;
+    const key = th.dataset.sort;
+    const arrow = key === state.sortKey ? (state.sortDir === 'asc' ? ' <span class="arrow">▲</span>' : ' <span class="arrow">▼</span>') : '';
+    th.innerHTML = th.dataset.label + arrow;
+  });
+}
+
+// ============================================================
+// Wiring
+// ============================================================
+function render() {
+  const items = filteredOpportunities();
+  renderTable(items);
+  renderSimulator(items);
+}
+
+document.getElementById('search').addEventListener('input', e => { state.search = e.target.value.trim().toLowerCase(); render(); });
+document.getElementById('dateFrom').addEventListener('change', e => { state.dateFrom = e.target.value || null; render(); });
+document.getElementById('dateTo').addEventListener('change', e => { state.dateTo = e.target.value || null; render(); });
+document.getElementById('marketFilter').addEventListener('change', e => { state.market = e.target.value; render(); });
+document.getElementById('siteFilter').addEventListener('change', e => { state.site = e.target.value; render(); });
+document.getElementById('bucketFilter').addEventListener('change', e => { state.bucket = e.target.value; render(); });
+document.getElementById('outcomeFilter').addEventListener('change', e => { state.outcome = e.target.value; render(); });
+document.getElementById('minEdge').addEventListener('input', e => { state.minEdge = e.target.value === '' ? null : parseFloat(e.target.value); render(); });
+
+document.querySelectorAll('.match-table th[data-sort]').forEach(th => {
+  th.addEventListener('click', () => {
+    const key = th.dataset.sort;
+    if (state.sortKey === key) state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
+    else { state.sortKey = key; state.sortDir = key === 'match' || key === 'bucket' ? 'asc' : 'desc'; }
+    render();
+  });
+});
+
+document.getElementById('modeFlat').addEventListener('click', () => {
+  state.mode = 'flat';
+  document.getElementById('modeFlat').classList.add('active');
+  document.getElementById('modeKelly').classList.remove('active');
+  document.getElementById('flatField').style.display = '';
+  document.getElementById('kellyField').style.display = 'none';
+  render();
+});
+document.getElementById('modeKelly').addEventListener('click', () => {
+  state.mode = 'kelly';
+  document.getElementById('modeKelly').classList.add('active');
+  document.getElementById('modeFlat').classList.remove('active');
+  document.getElementById('flatField').style.display = 'none';
+  document.getElementById('kellyField').style.display = '';
+  render();
+});
+document.getElementById('flatStake').addEventListener('input', e => { state.flatStake = parseFloat(e.target.value) || 0; render(); });
+document.getElementById('kellyFrac').addEventListener('input', e => {
+  state.kellyFraction = parseFloat(e.target.value);
+  document.getElementById('kellyFracVal').textContent = state.kellyFraction.toFixed(2);
+  render();
+});
+document.getElementById('methodA').addEventListener('click', () => {
+  state.method = 'a';
+  document.getElementById('methodA').classList.add('active');
+  document.getElementById('methodB').classList.remove('active');
+  render();
+});
+document.getElementById('methodB').addEventListener('click', () => {
+  state.method = 'b';
+  document.getElementById('methodB').classList.add('active');
+  document.getElementById('methodA').classList.remove('active');
+  render();
+});
 
 renderTiles();
 render();
-document.getElementById('footer').textContent = 'Pre-entry rows are reconstructed from raw capture history, not originally stored (they never crossed 3%). Click any row to expand its full trajectory.';
+document.getElementById('footer').textContent = 'Pre-entry rows are reconstructed from raw capture history, not originally stored (they never crossed 3%). Click any row to expand its full odds history across all 3 books. P&L simulator recomputes live from the same math as vb/evaluation.py (flat_stake_profit / kelly_stake_fraction).';
 </script>
