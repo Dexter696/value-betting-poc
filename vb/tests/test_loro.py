@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from vb.sources.loro import _parse_kickoff
+from vb.sources.loro import MAX_STAKE_CHF, LoroClient, _parse_kickoff
 
 ZURICH = ZoneInfo("Europe/Zurich")
 
@@ -39,3 +39,16 @@ def test_parse_kickoff_unrecognized_format_returns_none():
 def test_parse_kickoff_bad_time_returns_none():
     now_local = datetime(2026, 7, 23, 10, 0, tzinfo=ZURICH)
     assert _parse_kickoff("aujourd'hui", "not-a-time", now_local) is None
+
+
+def test_parse_row_sets_flat_max_stake():
+    # Loro has no per-market max stake either - a flat, site-wide cap
+    # confirmed live via the bet slip's own validation message (see
+    # MAX_STAKE_CHF docstring).
+    texts = ["Super League", "Lausanne - Sion", "18:00", "Lausanne", "1.80", "X", "3.40", "Sion", "4.20"]
+    now_local = datetime(2026, 7, 23, 10, 0, tzinfo=ZURICH)
+
+    row = LoroClient._parse_row("aujourd'hui", texts, "soccer", datetime.now(timezone.utc), now_local)
+
+    assert row is not None
+    assert row.snapshots[0].max_bet_size == MAX_STAKE_CHF

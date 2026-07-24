@@ -56,6 +56,14 @@ from ..models import MarketSnapshot, MarketType, Outcome, RawEvent, Selection
 SITE = "loro.ch"
 FOOTBALL_URL = "https://jeux.loro.ch/sports/hub/240?sport=FOOT"
 
+# Like Swisslos, Loro has no per-market max stake exposed anywhere - it's
+# a flat, site-wide, per-single-bet cap. Confirmed live (2026-07-24) via
+# the anonymous (no login needed) bet-slip validation message that
+# appears when a stake above this is entered: "Le montant de votre enjeu
+# ... a ete remplace par le montant maximum autorise CHF 500.00." Same
+# figure reproduced regardless of match/odds, so recorded as a constant.
+MAX_STAKE_CHF = 500.0
+
 _ZURICH = ZoneInfo("Europe/Zurich")
 
 _WEEKDAY_DATE_RE = re.compile(r"^[a-zé]{2,4}\.\s*(\d{1,2})\.(\d{1,2})$", re.IGNORECASE)
@@ -246,5 +254,6 @@ class LoroClient:
                 Outcome(Selection.AWAY, odds_away),
             ),
             captured_at=captured_at,
+            max_bet_size=MAX_STAKE_CHF,
         )
         return ScrapedRow(event=event, snapshots=[snapshot])

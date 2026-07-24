@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from vb.models import MarketType
-from vb.sources.swisslos import SwisslosClient, _competition_name, _parse_kickoff
+from vb.sources.swisslos import MAX_STAKE_CHF, SwisslosClient, _competition_name, _parse_kickoff
 
 ZURICH = ZoneInfo("Europe/Zurich")
 
@@ -119,3 +119,19 @@ def test_parse_row_returns_none_for_too_few_items():
     row = SwisslosClient._parse_row(row_el, "Some League", "soccer", datetime.now(timezone.utc), now_local)
 
     assert row is None
+
+
+def test_parse_row_sets_flat_max_stake_on_every_snapshot():
+    # Swisslos has no per-market max stake like Pinnacle - just a flat,
+    # site-wide cap confirmed live via the bet slip's own validation
+    # message (see MAX_STAKE_CHF docstring) - every snapshot should carry it.
+    row_el = _FakeRowElement(
+        "sportsSportsGrid_row_0_asw:event:xyz789",
+        ["Dortmund", "Bayern Munich", "Sa. 22.8 • 20:30", "• 124 >>", "4.80", "4.30", "1.62", "1.83", "3.5", "1.90"],
+    )
+    now_local = datetime(2026, 8, 1, 10, 0, tzinfo=ZURICH)
+
+    row = SwisslosClient._parse_row(row_el, "Bundesliga", "soccer", datetime.now(timezone.utc), now_local)
+
+    assert row is not None
+    assert all(s.max_bet_size == MAX_STAKE_CHF for s in row.snapshots)

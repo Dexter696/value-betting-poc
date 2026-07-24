@@ -70,6 +70,16 @@ SOCCER_COUNTRY_SLUGS = [
     "tschechien", "tuerkei", "ungarn", "uruguay", "wales",
 ]
 
+# Swisslos doesn't publish a per-market max stake like Pinnacle's
+# maxRiskStake - it's a flat, site-wide, per-single-bet cap, confirmed
+# live (2026-07-24) via the anonymous (no login needed) client-side
+# validation message that appears when a stake above this is entered in
+# the bet slip: "Dein maximaler Einsatz betraegt CHF 1'000.00." Same
+# figure reproduced across multiple different matches/markets, so this
+# is recorded as a constant rather than scraped per-row. Re-verify the
+# same way if it ever looks stale (Swisslos could change the policy).
+MAX_STAKE_CHF = 1000.0
+
 _ROW_ID_RE = re.compile(r"^sportsSportsGrid_row_\d+_asw:event:([0-9a-zA-Z]+)$")
 _ZURICH = ZoneInfo("Europe/Zurich")
 
@@ -267,6 +277,7 @@ class SwisslosClient:
                         Outcome(Selection.AWAY, odds_away),
                     ),
                     captured_at=captured_at,
+                    max_bet_size=MAX_STAKE_CHF,
                 )
             )
         except ValueError:
@@ -285,6 +296,7 @@ class SwisslosClient:
                             Outcome(Selection.UNDER, odds_under),
                         ),
                         captured_at=captured_at,
+                        max_bet_size=MAX_STAKE_CHF,
                     )
                 )
             except ValueError:
