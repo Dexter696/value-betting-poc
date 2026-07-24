@@ -72,6 +72,32 @@ def capture_swisslos_full(conn) -> None:
     log.info("swisslos (full breadth): captured %d events, %d snapshots", len(rows), sum(len(r.snapshots) for r in rows))
 
 
+def capture_swisslos_handicaps(conn) -> None:
+    # Full Asian Handicap sweep: re-fetches full country breadth first
+    # (to get a fresh detail_url per match - the "t=" match id isn't
+    # persisted anywhere in storage, see SwisslosClient module docstring)
+    # then visits every match's own detail page for its Asian Handicap
+    # market. At ~7s/page across hundreds of matches, this is by far the
+    # heaviest single step in this script (tens of minutes) - runs on its
+    # own, much slower schedule (see capture.yml), never every cycle.
+    client = SwisslosClient(headless=True)
+    rows = client.fetch_all_countries()
+    for row in rows:
+        save_raw_capture(conn, row.event, row.snapshots)
+    log.info(
+        "swisslos (full breadth, for handicap sweep): captured %d events, %d snapshots",
+        len(rows), sum(len(r.snapshots) for r in rows),
+    )
+
+    handicap_rows = client.fetch_all_handicaps(rows)
+    for row in handicap_rows:
+        save_raw_capture(conn, row.event, row.snapshots)
+    log.info(
+        "swisslos (asian handicap): captured handicap markets for %d/%d matches, %d snapshot(s)",
+        len(handicap_rows), len(rows), sum(len(r.snapshots) for r in handicap_rows),
+    )
+
+
 def capture_loro(conn) -> None:
     client = LoroClient(headless=True)
     rows = client.fetch_football()
@@ -115,13 +141,25 @@ def main() -> None:
         help="Use the full country-by-country Swisslos sweep instead of the quick single-page fetch. "
              "Takes ~5min longer - meant for a less-frequent schedule (~15-20min), not every cycle.",
     )
+    parser.add_argument(
+        "--full-handicaps", action="store_true",
+        help="Sweep every Swisslos match's own detail page for its Asian Handicap market, on top of "
+             "the full country breadth. Tens of minutes - meant for a much slower schedule (daily) than "
+             "--full-swisslos, and replaces the normal Swisslos/Loro captures for this cycle rather than "
+             "stacking on top of them.",
+    )
     args = parser.parse_args()
 
-    log.info("=== cycle start (full_swisslos=%s) ===", args.full_swisslos)
+    log.info("=== cycle start (full_swisslos=%s, full_handicaps=%s) ===", args.full_swisslos, args.full_handicaps)
     conn = init_db(DB_PATH)
 
-    swisslos_fn = capture_swisslos_full if args.full_swisslos else capture_swisslos
-    for name, fn in [("pinnacle", capture_pinnacle), ("swisslos", swisslos_fn), ("loro", capture_loro)]:
+    if args.full_handicaps:
+        steps = [("pinnacle", capture_pinnacle), ("swisslos handicaps", capture_swisslos_handicaps)]
+    else:
+        swisslos_fn = capture_swisslos_full if args.full_swisslos else capture_swisslos
+        steps = [("pinnacle", capture_pinnacle), ("swisslos", swisslos_fn), ("loro", capture_loro)]
+
+    for name, fn in steps:
         try:
             fn(conn)
         except Exception:

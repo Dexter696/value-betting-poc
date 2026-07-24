@@ -14,6 +14,13 @@ on:
     # (7/27/47 rather than a multiple of 5) so the two schedules never
     # fire in the same minute and queue up on each other.
     - cron: "7,27,47 * * * *"
+    # Swisslos Asian Handicap sweep: one detail-page visit per match
+    # (see SwisslosClient.fetch_all_handicaps docstring) - tens of
+    # minutes, so this runs once daily rather than every few minutes,
+    # accepting stale handicap odds most of the time in exchange for not
+    # blocking the fast-moving quick cycle. Minute 13 doesn't collide
+    # with either of the other two schedules' grids.
+    - cron: "13 3 * * *"
   workflow_dispatch: {}
 
 concurrency:
@@ -23,10 +30,10 @@ concurrency:
 jobs:
   capture:
     runs-on: ubuntu-latest
-    # The full-breadth Swisslos sweep alone takes ~5min; leave headroom
-    # for Pinnacle+Loro+pipeline+prune on top of that (was 8min when only
-    # the quick Swisslos fetch existed).
-    timeout-minutes: 12
+    # The Asian Handicap sweep (one page load per match, hundreds of
+    # matches) is the long pole here - tens of minutes, vs ~5min for the
+    # full-breadth Swisslos sweep and ~2min for the quick cycle.
+    timeout-minutes: 65
     steps:
       - uses: actions/checkout@v4
 
@@ -50,7 +57,9 @@ jobs:
 
       - name: Run capture + pipeline cycle
         run: |
-          if [ "${{ github.event.schedule }}" = "7,27,47 * * * *" ]; then
+          if [ "${{ github.event.schedule }}" = "13 3 * * *" ]; then
+            python scripts/scheduled_run.py --full-handicaps
+          elif [ "${{ github.event.schedule }}" = "7,27,47 * * * *" ]; then
             python scripts/scheduled_run.py --full-swisslos
           else
             python scripts/scheduled_run.py

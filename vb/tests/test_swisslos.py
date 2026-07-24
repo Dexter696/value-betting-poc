@@ -2,18 +2,25 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from vb.models import MarketType
-from vb.sources.swisslos import MAX_STAKE_CHF, SwisslosClient, _competition_name, _parse_kickoff
+from vb.sources.swisslos import (
+    MAX_STAKE_CHF,
+    SwisslosClient,
+    _competition_name,
+    _parse_asian_handicap_section,
+    _parse_kickoff,
+)
 
 ZURICH = ZoneInfo("Europe/Zurich")
 
 
 class _FakeRowElement:
     """Stands in for a Playwright ElementHandle for _parse_row tests -
-    only the two methods _parse_row actually calls."""
+    only the methods _parse_row actually calls."""
 
-    def __init__(self, row_id: str, texts: list[str]):
+    def __init__(self, row_id: str, texts: list[str], detail_href: str | None = None):
         self._row_id = row_id
         self._texts = texts
+        self._detail_href = detail_href
 
     def get_attribute(self, name):
         assert name == "id"
@@ -21,6 +28,19 @@ class _FakeRowElement:
 
     def eval_on_selector_all(self, selector, script):
         return self._texts
+
+    def query_selector(self, selector):
+        assert selector == "a"
+        return _FakeLinkElement(self._detail_href) if self._detail_href else None
+
+
+class _FakeLinkElement:
+    def __init__(self, href: str):
+        self._href = href
+
+    def get_attribute(self, name):
+        assert name == "href"
+        return self._href
 
 
 def test_parse_kickoff_heute():
@@ -135,3 +155,95 @@ def test_parse_row_sets_flat_max_stake_on_every_snapshot():
 
     assert row is not None
     assert all(s.max_bet_size == MAX_STAKE_CHF for s in row.snapshots)
+
+
+def test_parse_row_captures_detail_url_from_row_link():
+    row_el = _FakeRowElement(
+        "sportsSportsGrid_row_0_asw:event:xyz789",
+        ["Dortmund", "Bayern Munich", "Sa. 22.8 • 20:30", "• 124 >>", "4.80", "4.30", "1.62"],
+        detail_href="https://www.swisslos.ch/de/sporttip/sportwetten/fussball/deutschland/bundesliga/dortmund-vs-bayern-munich?t=123",
+    )
+    now_local = datetime(2026, 8, 1, 10, 0, tzinfo=ZURICH)
+
+    row = SwisslosClient._parse_row(row_el, "Bundesliga", "soccer", datetime.now(timezone.utc), now_local)
+
+    assert row is not None
+    assert row.detail_url == "https://www.swisslos.ch/de/sporttip/sportwetten/fussball/deutschland/bundesliga/dortmund-vs-bayern-munich?t=123"
+
+
+def test_parse_row_detail_url_none_when_row_has_no_link():
+    row_el = _FakeRowElement(
+        "sportsSportsGrid_row_0_asw:event:xyz789",
+        ["Dortmund", "Bayern Munich", "Sa. 22.8 • 20:30", "• 124 >>", "4.80", "4.30", "1.62"],
+    )
+    now_local = datetime(2026, 8, 1, 10, 0, tzinfo=ZURICH)
+
+    row = SwisslosClient._parse_row(row_el, "Bundesliga", "soccer", datetime.now(timezone.utc), now_local)
+
+    assert row is not None
+    assert row.detail_url is None
+
+
+# Real body text captured live 2026-07-24 from a match detail page's
+# "Asiatisch" tab (FC Lausanne-Sport vs Grasshopper Club Zurich).
+_ASIAN_HANDICAP_SAMPLE = """Asiatisches Handicap
+-2 Team 1
+5.00
++2 Team 2
+1.13
+-1 Team 1
+2.50
++1 Team 2
+1.48
+0 Team 1
+1.42
+0 Team 2
+2.65
++1 Team 1
+1.10
+-1 Team 2
+5.90
+1. Halbzeit - Asiatisches Handicap
+-1 Team 1
+4.45
++1 Team 2
+1.17
+0 Team 1
+1.48
+0 Team 2
+2.45
+2. Halbzeit - Asiatisches Handicap
+-1 Team 1
+3.75
++1 Team 2
+1.24
+"""
+
+
+def test_parse_asian_handicap_section_extracts_full_match_lines_only():
+    markets = _parse_asian_handicap_section(_ASIAN_HANDICAP_SAMPLE)
+
+    assert set(m[0] for m in markets) == {-2.0, -1.0, 0.0, 1.0}
+    by_line = {line: (home_odds, away_odds) for line, home_odds, away_odds in markets}
+    assert by_line[-2.0] == (5.00, 1.13)
+    assert by_line[0.0] == (1.42, 2.65)
+
+
+def test_parse_asian_handicap_section_excludes_half_time_variants():
+    # 4.45/1.17 and 3.75/1.24 are the 1st/2nd-half odds for line -1/+1 -
+    # the full-match line -1 must resolve to the full-match odds (2.50/1.48),
+    # not get overwritten by a half-time entry that shares the same line.
+    markets = _parse_asian_handicap_section(_ASIAN_HANDICAP_SAMPLE)
+    by_line = {line: (home_odds, away_odds) for line, home_odds, away_odds in markets}
+    assert by_line[-1.0] == (2.50, 1.48)
+
+
+def test_parse_asian_handicap_section_missing_heading_returns_empty():
+    assert _parse_asian_handicap_section("no handicap markets on this page at all") == []
+
+
+def test_parse_asian_handicap_section_skips_unpaired_line():
+    # a line with only one side present (other side suspended/missing) -
+    # must be skipped rather than guessed at.
+    text = "Asiatisches Handicap\n-1 Team 1\n2.50\n"
+    assert _parse_asian_handicap_section(text) == []

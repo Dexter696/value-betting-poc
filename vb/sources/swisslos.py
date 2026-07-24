@@ -19,11 +19,16 @@ grid (asw-sports-grid-* custom elements):
             home_team, away_team, "<reltime> • HH:MM", "• N >>",
             odds_home, odds_draw, odds_away, odds_over, total_line, odds_under
 
-Only match-winner (1X2) and totals show in this default grid view — the
-column set is user-configurable on the live site (dropdowns can swap in
-"Handicap" etc) but this scraper reads whatever the default view shows.
-Handicap capture is a TODO (see methodology's "match not only match-winner
-but handicaps etc").
+Only match-winner (1X2) and totals show in the default grid view. A real,
+Pinnacle-comparable 2-way Asian Handicap market does exist (confirmed
+live 2026-07-24), but only on each match's own detail page under an
+"Asiatisch" tab — NOT the aggregate grid, and NOT the grid's own generic
+"Handicap" tab (that one is 3-way/European-style, virtual-score handicap,
+a different market shape our pipeline doesn't model). Getting it means
+one extra page load per match (fetch_asian_handicap /
+fetch_all_handicaps below) - expensive at ~7s/page across hundreds of
+matches, so this runs on its own, much slower schedule than the grid
+sweep, not every cycle.
 
 No virtualization was observed: a full section's rows are all present in
 the DOM after load, no scroll-triggered lazy loading to handle.
@@ -128,10 +133,59 @@ def _competition_name(header_text: str) -> str:
     return (m.group(0) if m else header_text).strip()
 
 
+_ASIAN_HANDICAP_HEADING = "Asiatisches Handicap"
+_ASIAN_HANDICAP_ENTRY_RE = re.compile(r"([+-]?\d+(?:\.\d+)?)\s*Team\s*([12])\s*\n\s*([\d.]+)")
+
+
+def _parse_asian_handicap_section(body_text: str) -> list[tuple[float, float, float]]:
+    """Parse the full-match "Asiatisches Handicap" block out of the match
+    detail page's body text into (home_perspective_line, home_odds,
+    away_odds) tuples. "Team 1" is the home team, "Team 2" away -
+    confirmed by position ("Team 1" always corresponds to the same team
+    listed first/as "1" in the same page's Endergebnis/1X2 section).
+
+    Only the full-match block, not the "1. Halbzeit"/"2. Halbzeit"
+    (half-time) variants that follow it on the same page and use an
+    identical entry format - isolated by slicing between the first
+    occurrence of the heading and the next (which is always
+    "1. Halbzeit - Asiatisches Handicap", itself containing the heading
+    as a substring).
+    """
+    first_idx = body_text.find(_ASIAN_HANDICAP_HEADING)
+    if first_idx == -1:
+        return []
+    second_idx = body_text.find(_ASIAN_HANDICAP_HEADING, first_idx + 1)
+    section = body_text[first_idx:second_idx if second_idx != -1 else None]
+
+    entries: dict[tuple[str, float], float] = {}
+    for line_str, team, odds_str in _ASIAN_HANDICAP_ENTRY_RE.findall(section):
+        entries[(team, float(line_str))] = float(odds_str)
+
+    markets: list[tuple[float, float, float]] = []
+    seen_lines: set[float] = set()
+    for (team, line), home_odds in entries.items():
+        if team != "1" or line in seen_lines:
+            continue
+        away_odds = entries.get(("2", -line))
+        if away_odds is None:
+            continue  # one side missing/suspended - skip rather than guess
+        seen_lines.add(line)
+        markets.append((line, home_odds, away_odds))
+    return markets
+
+
 @dataclass
 class ScrapedRow:
     event: RawEvent
     snapshots: list[MarketSnapshot]
+    # The match's own detail-page URL (e.g.
+    # ".../fussball/schweiz/super-league/team-a-vs-team-b?t=17849952") -
+    # captured off the row's <a href> since it embeds a "t=" id that
+    # doesn't match the grid row's own asw:event:{id} and can't be
+    # reconstructed. Only the Asian Handicap market needs this (see
+    # fetch_asian_handicap) - None if a row had no <a> (shouldn't happen
+    # in practice, but not asserted on).
+    detail_url: Optional[str] = None
 
 
 class SwisslosClient:
@@ -191,6 +245,70 @@ class SwisslosClient:
             finally:
                 browser.close()
 
+    def fetch_all_handicaps(self, rows: list[ScrapedRow]) -> list[ScrapedRow]:
+        """Visits every given row's own detail page (one navigation per
+        match - see module docstring on why this is expensive and runs
+        on its own slow schedule) and returns a new ScrapedRow per match
+        that had a usable Asian Handicap section, containing only the
+        ASIAN_HANDICAP snapshots (caller saves these alongside, not
+        instead of, the match-winner/totals snapshots already captured
+        by fetch_football()/fetch_all_countries()).
+
+        Rows without a detail_url (shouldn't normally happen) are
+        skipped, not guessed at.
+        """
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=self.headless)
+            try:
+                page = browser.new_page()
+                results: list[ScrapedRow] = []
+                for row in rows:
+                    if row.detail_url is None:
+                        continue
+                    try:
+                        snapshots = self._fetch_asian_handicap(page, row.detail_url, row.event)
+                    except PlaywrightTimeoutError:
+                        logging.getLogger("vb.sources.swisslos").warning(
+                            "timed out loading handicap page for %s vs %s - skipping",
+                            row.event.raw_home_team, row.event.raw_away_team,
+                        )
+                        continue
+                    if snapshots:
+                        results.append(ScrapedRow(event=row.event, snapshots=snapshots, detail_url=row.detail_url))
+                return results
+            finally:
+                browser.close()
+
+    def _fetch_asian_handicap(self, page: Page, detail_url: str, event: RawEvent) -> list[MarketSnapshot]:
+        captured_at = datetime.now(timezone.utc)
+
+        page.goto(detail_url, wait_until="load", timeout=self.timeout_ms)
+        page.wait_for_timeout(1500)
+
+        tab = page.query_selector("text=/Asiatisch/")
+        if tab is None:
+            return []  # this match's page doesn't offer the Asian Handicap tab at all
+        tab.click(force=True)
+        page.wait_for_timeout(1200)
+
+        body_text = page.inner_text("body")
+        snapshots = []
+        for line, home_odds, away_odds in _parse_asian_handicap_section(body_text):
+            snapshots.append(
+                MarketSnapshot(
+                    event=event,
+                    market_type=MarketType.ASIAN_HANDICAP,
+                    line=line,
+                    outcomes=(
+                        Outcome(Selection.HOME, home_odds),
+                        Outcome(Selection.AWAY, away_odds),
+                    ),
+                    captured_at=captured_at,
+                    max_bet_size=MAX_STAKE_CHF,
+                )
+            )
+        return snapshots
+
     def _fetch_page(self, page: Page, url: str, sport: str) -> list[ScrapedRow]:
         captured_at = datetime.now(timezone.utc)
         now_local = datetime.now(_ZURICH)
@@ -229,11 +347,14 @@ class SwisslosClient:
             "els => els.filter(e => e.children.length === 0 && "
             "e.textContent.trim()).map(e => e.textContent.trim())",
         )
-        return SwisslosClient._parse_row_data(row_id, texts, competition, sport, captured_at, now_local)
+        link_el = row_el.query_selector("a")
+        detail_url = link_el.get_attribute("href") if link_el else None
+        return SwisslosClient._parse_row_data(row_id, texts, competition, sport, captured_at, now_local, detail_url)
 
     @staticmethod
     def _parse_row_data(
-        row_id: str, texts: list[str], competition: str, sport: str, captured_at: datetime, now_local: datetime
+        row_id: str, texts: list[str], competition: str, sport: str, captured_at: datetime, now_local: datetime,
+        detail_url: Optional[str] = None,
     ) -> Optional["ScrapedRow"]:
         m = _ROW_ID_RE.match(row_id)
         if not m:
@@ -304,4 +425,4 @@ class SwisslosClient:
 
         if not snapshots:
             return None
-        return ScrapedRow(event=event, snapshots=snapshots)
+        return ScrapedRow(event=event, snapshots=snapshots, detail_url=detail_url)
