@@ -46,11 +46,26 @@
   .subtitle { color: var(--text-secondary); font-size: 13px; margin: 0 0 20px; }
   .section { margin-bottom: 22px; }
 
-  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 10px; }
-  .tiles.secondary { grid-template-columns: repeat(4, 1fr); }
+  .tile-group { margin-bottom: 14px; }
+  .tile-group-label { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-muted); margin-bottom: 6px; }
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
   .tile { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
   .tile .value { font-size: 19px; font-weight: 600; line-height: 1.1; font-variant-numeric: tabular-nums; }
   .tile .label { font-size: 10.5px; color: var(--text-secondary); margin-top: 4px; }
+  .tile.secondary { background: transparent; border-style: dashed; padding: 8px 12px; }
+  .tile.secondary .value { font-size: 14px; color: var(--text-muted); }
+  .tile.secondary .label { color: var(--text-muted); }
+
+  /* ---- global threshold control ---- */
+  .threshold-bar {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 12px 16px; margin-bottom: 16px;
+    background: color-mix(in srgb, var(--accent) 8%, var(--surface-2)); border: 1px solid var(--accent); border-radius: 8px;
+  }
+  .threshold-bar label { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+  .threshold-bar input[type="range"] { width: 220px; }
+  .threshold-bar .tval { font-size: 15px; font-weight: 700; color: var(--accent); min-width: 42px; }
+  .threshold-bar .note { font-size: 11px; color: var(--text-secondary); }
 
   /* ---- filter bar ---- */
   .controls {
@@ -173,11 +188,31 @@
   <h1>Value Betting — analysis dashboard</h1>
   <p class="subtitle" id="subtitle">data/vb.sqlite</p>
 
-  <div class="tiles" id="tiles"></div>
-  <div class="tiles secondary" id="tilesMethod"></div>
+  <div class="threshold-bar">
+    <label for="entryThreshold">Entry threshold</label>
+    <input type="range" id="entryThreshold" min="3" max="15" step="0.5" value="3" />
+    <span class="tval" id="thresholdVal">3.0%</span>
+    <span class="note">Recalculates everything below (tiles, table, simulator) as if we only bet when edge A reaches this level, using each opportunity's own captured trajectory - not a re-scrape. Method A only for now.</span>
+  </div>
+
+  <div class="tile-group">
+    <div class="tile-group-label">Data collection</div>
+    <div class="tiles" id="tilesData"></div>
+  </div>
+
+  <div class="tile-group">
+    <div class="tile-group-label">Betting activity (Method A, at current threshold)</div>
+    <div class="tiles" id="tilesBetting"></div>
+    <div class="tiles" id="tilesBettingSecondary" style="margin-top:6px"></div>
+  </div>
+
+  <div class="tile-group">
+    <div class="tile-group-label">Performance</div>
+    <div class="tiles" id="tilesMethod"></div>
+  </div>
 
   <div class="section">
-    <h2>P&amp;L Simulator</h2>
+    <h2>P&amp;L Simulator (Method A)</h2>
     <div class="sim-panel">
       <div class="sim-controls">
         <div class="field">
@@ -194,13 +229,6 @@
         <div class="field" id="kellyField" style="display:none">
           <label>Kelly fraction <span class="fval" id="kellyFracVal">0.25</span></label>
           <input type="range" id="kellyFrac" min="0.1" max="1" step="0.05" value="0.25" />
-        </div>
-        <div class="field">
-          <label>Betting rule</label>
-          <div class="btn-group">
-            <button class="filter-btn active" id="methodA">Method A (all flagged)</button>
-            <button class="filter-btn" id="methodB">Method B (both agree)</button>
-          </div>
         </div>
       </div>
       <div class="sim-results" id="simResults"></div>
@@ -255,8 +283,8 @@
         <tr>
           <th data-sort="match">Match</th>
           <th data-sort="bucket">Bucket</th>
-          <th class="num" data-sort="entryEdgeA">Entry A</th>
-          <th class="num" data-sort="entryEdgeB">Entry B</th>
+          <th class="num" data-sort="entryEdgeA" title="Recalculated at the current threshold">Entry A</th>
+          <th class="num" data-sort="entryEdgeB" title="Always at the original 3% threshold, for reference">Entry B (3%)</th>
           <th class="num" data-sort="peakEdgeA">Peak</th>
           <th data-sort="kickoff">Kickoff</th>
           <th class="num" data-sort="convergence">Converge</th>
@@ -300,6 +328,58 @@ function isWinCredit(outcome) {
 }
 
 // ============================================================
+// Threshold-adjusted entry (Method A only, threshold >= 3%)
+//
+// The stored entryEdgeA/entryComparisonOdds/bucket on each opportunity
+// are fixed to the ORIGINAL 3% crossing (that's what made it a tracked
+// opportunity at all). To simulate "what if I only bet above T%", we
+// instead scan the opportunity's own captured snapshot trajectory (no
+// re-scrape - this is all already-recorded data) for the first point
+// where edgeA >= T, and use THAT point's real captured odds as entry.
+// Only >=3% is supported (the snapshots array starts at the 3% cross,
+// so anything at or above that is always fully covered by real data;
+// going below 3% would need the shorter, capped pre-entry history and
+// was deliberately scoped out).
+// ============================================================
+function oddsForSelection(outcomes, selection) {
+  if (!outcomes) return null;
+  const o = outcomes.find(x => x.selection === selection);
+  return o ? o.odds : null;
+}
+function oddsBucket(benchmarkOdds) {
+  if (benchmarkOdds < 2.0) return 'favorite';
+  if (benchmarkOdds < 4.0) return 'mid';
+  return 'longshot';
+}
+function effectiveEntryA(opp, threshold) {
+  for (const s of opp.snapshots) {
+    if (s.edgeA >= threshold) {
+      const books = s.books || {};
+      const comparisonOdds = oddsForSelection(books[opp.comparisonSite], opp.selection);
+      const benchmarkOdds = oddsForSelection(books[opp.benchmarkSite], opp.selection);
+      if (comparisonOdds === null || benchmarkOdds === null) continue; // shouldn't happen, but don't fabricate an entry
+      return { edgeA: s.edgeA, edgeB: s.edgeB, comparisonOdds, benchmarkOdds, capturedAt: s.capturedAt, bucket: oddsBucket(benchmarkOdds) };
+    }
+  }
+  return null; // never reached this threshold - wouldn't have been bet under this rule
+}
+// Precomputed once per render (threshold changes rarely relative to
+// other filters) rather than re-scanning snapshots on every access -
+// keyed by instanceId, value is effectiveEntryA() result or null.
+let entryCache = new Map();
+let entryCacheThreshold = null;
+function getEntry(opp) {
+  if (entryCacheThreshold !== state.threshold) {
+    entryCache = new Map();
+    entryCacheThreshold = state.threshold;
+  }
+  if (!entryCache.has(opp.instanceId)) {
+    entryCache.set(opp.instanceId, effectiveEntryA(opp, state.threshold));
+  }
+  return entryCache.get(opp.instanceId);
+}
+
+// ============================================================
 // Formatting helpers
 // ============================================================
 function pct(x) { return (x * 100).toFixed(1) + '%'; }
@@ -328,15 +408,21 @@ function statusOf(opp) {
 }
 
 // A leg "counts" for Method B (both methods agree) if its entry edge B
-// also cleared the threshold - same filter vb.evaluation.evaluate() uses.
+// also cleared the ORIGINAL 3% threshold - same filter vb.evaluation.
+// evaluate() uses. Method B stays fixed at 3% throughout (not threshold-
+// adjustable yet - see dashboard_template.html scope notes), used only
+// for the static Performance comparison tiles.
 function methodBAgrees(opp) { return opp.entryEdgeB >= THRESHOLD; }
 
-function legPnl(opp, method, mode, flatStake, kellyFraction) {
+// Method A P&L at the current global threshold - null if either the
+// match isn't settled yet or this opportunity never reached the
+// threshold at all (wouldn't have been bet under this rule).
+function legPnl(opp, mode, flatStake, kellyFraction) {
   if (!opp.outcome) return null;
-  const edge = method === 'b' ? opp.entryEdgeB : opp.entryEdgeA;
-  const odds = opp.entryComparisonOdds;
-  if (mode === 'kelly') return kellyStakeProfit(opp.outcome, odds, edge, kellyFraction);
-  return flatStakeProfit(opp.outcome, odds, flatStake);
+  const entry = getEntry(opp);
+  if (!entry) return null;
+  if (mode === 'kelly') return kellyStakeProfit(opp.outcome, entry.comparisonOdds, entry.edgeA, kellyFraction);
+  return flatStakeProfit(opp.outcome, entry.comparisonOdds, flatStake);
 }
 
 // ============================================================
@@ -345,11 +431,17 @@ function legPnl(opp, method, mode, flatStake, kellyFraction) {
 const state = {
   search: '', dateFrom: null, dateTo: null,
   market: 'all', site: 'all', bucket: 'all', outcome: 'all', minEdge: null,
-  method: 'a', mode: 'flat', flatStake: 1.0, kellyFraction: 0.25,
+  threshold: 0.03, mode: 'flat', flatStake: 1.0, kellyFraction: 0.25,
   sortKey: 'kickoff', sortDir: 'desc',
 };
 
+// Only opportunities that actually reach the current global threshold
+// under Method A count as "bet" at all - everything downstream (tiles,
+// table, simulator) is scoped to this set.
+function qualifiesAtThreshold(opp) { return getEntry(opp) !== null; }
+
 function passesFilters(opp) {
+  if (!qualifiesAtThreshold(opp)) return false;
   if (state.search) {
     const hay = `${opp.home} ${opp.away} ${opp.competition}`.toLowerCase();
     if (!hay.includes(state.search)) return false;
@@ -358,15 +450,13 @@ function passesFilters(opp) {
   if (state.dateTo && opp.kickoffUtc > state.dateTo + 'T23:59:59') return false;
   if (state.market !== 'all' && opp.marketType !== state.market) return false;
   if (state.site !== 'all' && opp.comparisonSite !== state.site) return false;
-  if (state.bucket !== 'all' && opp.bucket !== state.bucket) return false;
+  if (state.bucket !== 'all' && getEntry(opp).bucket !== state.bucket) return false;
   if (state.outcome !== 'all') {
     const s = statusOf(opp).key;
     if (state.outcome === 'unsettled') { if (!(!opp.isOpen && !opp.outcome)) return false; }
     else if (s !== state.outcome) return false;
   }
-  const relevantEdge = state.method === 'b' ? opp.entryEdgeB : opp.entryEdgeA;
-  if (state.minEdge !== null && relevantEdge * 100 < state.minEdge) return false;
-  if (state.method === 'b' && !methodBAgrees(opp)) return false;
+  if (state.minEdge !== null && getEntry(opp).edgeA * 100 < state.minEdge) return false;
   return true;
 }
 
@@ -379,27 +469,43 @@ function filteredOpportunities() {
 // ============================================================
 function renderTiles() {
   const s = DATA.stats;
-  document.getElementById('tiles').innerHTML = `
+  document.getElementById('tilesData').innerHTML = `
     <div class="tile"><div class="value">${s.matchesCaptured.toLocaleString()}</div><div class="label">matches captured</div></div>
     <div class="tile"><div class="value">${s.oddsSnapshots.toLocaleString()}</div><div class="label">odds snapshots</div></div>
-    <div class="tile"><div class="value">${s.liveOpportunities}</div><div class="label">live opportunities</div></div>
-    <div class="tile"><div class="value">${s.resolvedOpportunities}</div><div class="label">resolved opportunities</div></div>
   `;
 
-  const settled = DATA.opportunities.filter(o => o.outcome);
-  const bAgrees = settled.filter(methodBAgrees);
-  const statsFor = (legs, method) => {
+  // Betting-activity tiles are scoped to whatever qualifies at the
+  // CURRENT threshold - not DATA.stats' fixed 3% counts, and not
+  // affected by the other filters (date/market/site/etc) below, so
+  // they always answer "at this threshold, across everything captured".
+  const qualifying = DATA.opportunities.filter(qualifiesAtThreshold);
+  const settled = qualifying.filter(o => o.outcome);
+  const awaiting = qualifying.length - settled.length;
+  const resolved = qualifying.filter(o => !o.isOpen).length;
+
+  document.getElementById('tilesBetting').innerHTML = `
+    <div class="tile"><div class="value">${qualifying.length}</div><div class="label">bets identified</div></div>
+    <div class="tile"><div class="value">${awaiting}</div><div class="label">awaiting result</div></div>
+    <div class="tile"><div class="value">${settled.length}</div><div class="label">settled</div></div>
+  `;
+  document.getElementById('tilesBettingSecondary').innerHTML = `
+    <div class="tile secondary"><div class="value">${resolved}</div><div class="label">resolved (tracker stopped watching - dropped below threshold, market suspended, or kickoff arrived; not a betting outcome)</div></div>
+  `;
+
+  const statsFor = (legs, edgeOf, oddsOf) => {
     const wins = legs.map(l => isWinCredit(l.outcome)).filter(v => v !== null);
     const hitRate = wins.length ? wins.reduce((a,b) => a+b, 0) / wins.length : null;
-    const profit = legs.reduce((sum, l) => sum + flatStakeProfit(l.outcome, l.entryComparisonOdds, 1.0), 0);
+    const profit = legs.reduce((sum, l) => sum + flatStakeProfit(l.outcome, oddsOf(l), 1.0), 0);
     const roi = legs.length ? profit / legs.length : 0;
     return { n: legs.length, hitRate, roi };
   };
-  const a = statsFor(settled, 'a'), b = statsFor(bAgrees, 'b');
+  const a = statsFor(settled, l => getEntry(l).edgeA, l => getEntry(l).comparisonOdds);
+  const bLegs = DATA.opportunities.filter(o => o.outcome && methodBAgrees(o));
+  const b = statsFor(bLegs, l => l.entryEdgeB, l => l.entryComparisonOdds);
   document.getElementById('tilesMethod').innerHTML = `
-    <div class="tile"><div class="value">${a.n} / ${a.hitRate !== null ? (a.hitRate*100).toFixed(0)+'%' : 'n/a'}</div><div class="label">Method A: settled bets / hit rate</div></div>
+    <div class="tile"><div class="value">${a.n} / ${a.hitRate !== null ? (a.hitRate*100).toFixed(0)+'%' : 'n/a'}</div><div class="label">Method A (threshold ${(state.threshold*100).toFixed(1)}%): settled bets / hit rate</div></div>
     <div class="tile"><div class="value ${a.roi >= 0 ? 'edge-pos' : 'edge-neg'}">${pct(a.roi)}</div><div class="label">Method A: flat ROI</div></div>
-    <div class="tile"><div class="value">${b.n} / ${b.hitRate !== null ? (b.hitRate*100).toFixed(0)+'%' : 'n/a'}</div><div class="label">Method B agrees: settled bets / hit rate</div></div>
+    <div class="tile"><div class="value">${b.n} / ${b.hitRate !== null ? (b.hitRate*100).toFixed(0)+'%' : 'n/a'}</div><div class="label">Method B agrees (fixed 3%): settled bets / hit rate</div></div>
     <div class="tile"><div class="value ${b.roi >= 0 ? 'edge-pos' : 'edge-neg'}">${pct(b.roi)}</div><div class="label">Method B agrees: flat ROI</div></div>
   `;
 }
@@ -432,14 +538,16 @@ function buildPnlChartSVG(points) {
 }
 
 function renderSimulator(items) {
-  const settled = items.filter(o => o.outcome).filter(o => state.method === 'a' || methodBAgrees(o));
+  // items is already threshold-qualified (filteredOpportunities() applies
+  // qualifiesAtThreshold up front) - just narrow to settled ones here.
+  const settled = items.filter(o => o.outcome);
   const sorted = settled.slice().sort((a, b) => new Date(a.kickoffUtc) - new Date(b.kickoffUtc));
 
-  const legPnlOf = (o) => legPnl(o, state.method, state.mode, state.flatStake, state.kellyFraction);
+  const legPnlOf = (o) => legPnl(o, state.mode, state.flatStake, state.kellyFraction);
   const legStakeOf = (o) => {
     if (state.mode === 'flat') return state.flatStake;
-    const edge = state.method === 'b' ? o.entryEdgeB : o.entryEdgeA;
-    return kellyStakeFraction(edge, o.entryComparisonOdds, state.kellyFraction);
+    const entry = getEntry(o);
+    return kellyStakeFraction(entry.edgeA, entry.comparisonOdds, state.kellyFraction);
   };
 
   const totalStaked = sorted.reduce((s, o) => s + legStakeOf(o), 0);
@@ -459,7 +567,7 @@ function renderSimulator(items) {
   const bucketLabel = { favorite: 'Favorite (<2.0)', mid: 'Mid (2.0-4.0)', longshot: 'Longshot (>=4.0)' };
   let rows = '<thead><tr><th>Bucket</th><th>N</th><th>Hit rate</th><th>ROI</th><th>Profit</th></tr></thead><tbody>';
   buckets.forEach(b => {
-    const legs = sorted.filter(o => o.bucket === b);
+    const legs = sorted.filter(o => getEntry(o).bucket === b);
     const staked = legs.reduce((s,o) => s + legStakeOf(o), 0);
     const profit = legs.reduce((s,o) => s + legPnlOf(o), 0);
     const bwins = legs.map(o => isWinCredit(o.outcome)).filter(v => v !== null);
@@ -600,13 +708,13 @@ function buildDetailRow(opp) {
 function sortValue(opp, key) {
   switch (key) {
     case 'match': return `${opp.home} ${opp.away}`;
-    case 'bucket': return opp.bucket;
-    case 'entryEdgeA': return opp.entryEdgeA;
-    case 'entryEdgeB': return opp.entryEdgeB;
-    case 'peakEdgeA': return opp.peakEdgeA;
+    case 'bucket': return getEntry(opp).bucket;
+    case 'entryEdgeA': return getEntry(opp).edgeA;
+    case 'entryEdgeB': return opp.entryEdgeB; // Method B stays fixed at 3%, see module notes
+    case 'peakEdgeA': return opp.peakEdgeA; // the trajectory-wide max - doesn't depend on where entry is defined
     case 'kickoff': return new Date(opp.kickoffUtc).getTime();
     case 'convergence': return opp.convergenceSeconds !== null && opp.convergenceSeconds !== undefined ? opp.convergenceSeconds : -Infinity;
-    case 'pnl': return legPnl(opp, state.method, state.mode, state.flatStake, state.kellyFraction) ?? -Infinity;
+    case 'pnl': return legPnl(opp, state.mode, state.flatStake, state.kellyFraction) ?? -Infinity;
     default: return 0;
   }
 }
@@ -627,16 +735,17 @@ function renderTable(items) {
 
   const rows = sorted.map((opp, i) => {
     const status = statusOf(opp);
+    const entry = getEntry(opp);
     const lineStr = opp.line !== null ? ' ' + opp.line : '';
     const legDesc = `${opp.marketType.replace('_',' ')}${lineStr} · ${opp.selection} · vs. ${siteLabel(opp.comparisonSite)}`;
-    const pnl = legPnl(opp, state.method, state.mode, state.flatStake, state.kellyFraction);
+    const pnl = legPnl(opp, state.mode, state.flatStake, state.kellyFraction);
     const pnlStr = pnl === null ? '—' : `${pnl >= 0 ? '+' : ''}${pnl.toFixed(3)}u`;
     const pnlCls = pnl === null ? '' : (pnl > 0 ? 'pnl-pos' : pnl < 0 ? 'pnl-neg' : 'pnl-zero');
     return `
       <tr class="row-main" data-idx="${i}">
         <td class="match-cell"><div class="home-away">${opp.home} vs ${opp.away}</div><div class="meta">${legDesc}</div></td>
-        <td><span class="bucket-badge">${opp.bucket}</span></td>
-        <td class="num ${edgeClass(opp.entryEdgeA)}">${pct(opp.entryEdgeA)}</td>
+        <td><span class="bucket-badge">${entry.bucket}</span></td>
+        <td class="num ${edgeClass(entry.edgeA)}">${pct(entry.edgeA)}</td>
         <td class="num ${edgeClass(opp.entryEdgeB)}">${pct(opp.entryEdgeB)}</td>
         <td class="num ${edgeClass(opp.peakEdgeA)}">${pct(opp.peakEdgeA)}</td>
         <td>${fmtDate(opp.kickoffUtc)}</td>
@@ -677,11 +786,17 @@ function renderTable(items) {
 // Wiring
 // ============================================================
 function render() {
+  renderTiles(); // depends on state.threshold via getEntry() - must re-run on every threshold change too
   const items = filteredOpportunities();
   renderTable(items);
   renderSimulator(items);
 }
 
+document.getElementById('entryThreshold').addEventListener('input', e => {
+  state.threshold = parseFloat(e.target.value) / 100;
+  document.getElementById('thresholdVal').textContent = parseFloat(e.target.value).toFixed(1) + '%';
+  render();
+});
 document.getElementById('search').addEventListener('input', e => { state.search = e.target.value.trim().toLowerCase(); render(); });
 document.getElementById('dateFrom').addEventListener('change', e => { state.dateFrom = e.target.value || null; render(); });
 document.getElementById('dateTo').addEventListener('change', e => { state.dateTo = e.target.value || null; render(); });
@@ -722,20 +837,7 @@ document.getElementById('kellyFrac').addEventListener('input', e => {
   document.getElementById('kellyFracVal').textContent = state.kellyFraction.toFixed(2);
   render();
 });
-document.getElementById('methodA').addEventListener('click', () => {
-  state.method = 'a';
-  document.getElementById('methodA').classList.add('active');
-  document.getElementById('methodB').classList.remove('active');
-  render();
-});
-document.getElementById('methodB').addEventListener('click', () => {
-  state.method = 'b';
-  document.getElementById('methodB').classList.add('active');
-  document.getElementById('methodA').classList.remove('active');
-  render();
-});
 
-renderTiles();
 render();
-document.getElementById('footer').textContent = 'Pre-entry rows are reconstructed from raw capture history, not originally stored (they never crossed 3%). Click any row to expand its full odds history across all 3 books. P&L simulator recomputes live from the same math as vb/evaluation.py (flat_stake_profit / kelly_stake_fraction).';
+document.getElementById('footer').textContent = 'Pre-entry rows are reconstructed from raw capture history, not originally stored (they never crossed 3%). Click any row to expand its full odds history across all 3 books. Entry threshold above recalculates Method A everywhere (tiles, table, simulator) from each opportunity\'s own captured trajectory - Method B stays fixed at the original 3%. P&L simulator recomputes live from the same math as vb/evaluation.py (flat_stake_profit / kelly_stake_fraction).';
 </script>
