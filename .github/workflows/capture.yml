@@ -21,7 +21,20 @@ on:
     # blocking the fast-moving quick cycle. Minute 13 doesn't collide
     # with either of the other two schedules' grids.
     - cron: "13 3 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      db_sync:
+        description: >
+          Database sync action for reconciling local vs. GitHub-side data
+          (see scripts/merge_databases.py). "export" uploads the current
+          cached DB as a build artifact so it can be downloaded and merged
+          locally; "import" downloads the "db-sync" release asset (a
+          locally-merged DB) and uses it going forward instead of whatever
+          the cache currently holds. Both skip the normal capture cycle for
+          that one run.
+        type: choice
+        options: [none, export, import]
+        default: none
 
 concurrency:
   group: vb-capture
@@ -57,7 +70,23 @@ jobs:
           restore-keys: |
             vb-db-
 
+      - name: Export DB as build artifact
+        if: github.event.inputs.db_sync == 'export'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vb-db-export
+          path: data/vb.sqlite
+          retention-days: 3
+
+      - name: Import DB from db-sync release
+        if: github.event.inputs.db_sync == 'import'
+        run: |
+          gh release download db-sync --repo "${{ github.repository }}" --pattern vb.sqlite --output data/vb.sqlite --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Run capture + pipeline cycle
+        if: github.event.inputs.db_sync == 'none' || github.event.inputs.db_sync == ''
         run: |
           if [ "${{ github.event.schedule }}" = "13 3 * * *" ]; then
             python scripts/scheduled_run.py --full-handicaps
@@ -74,13 +103,18 @@ jobs:
       # (self-contained/embeds JSON data, no reason to commit it) - the
       # upload-pages-artifact/deploy-pages actions below publish it
       # straight to Pages hosting without ever needing a git commit.
+      # Runs on import too (not just the normal cycle) so a DB sync
+      # immediately republishes the dashboard with the reconciled data;
+      # skipped on export since nothing changed there.
       - name: Build dashboard
         id: build-dashboard
+        if: github.event.inputs.db_sync != 'export'
         run: |
           mkdir -p public
           python scripts/build_dashboard.py public/index.html
 
       - name: Upload dashboard artifact
+        if: github.event.inputs.db_sync != 'export'
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
