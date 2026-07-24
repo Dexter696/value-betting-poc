@@ -15,19 +15,24 @@ ids, which have no meaning across two independently-created databases:
 opportunity.instance_id ("{market_key}#{seq}") is a different problem:
 it's deterministic *within* one database, not guaranteed unique *across*
 two independently-run ones that happened to track the same market_key.
-On a collision, the incoming opportunity (and its opportunity_snapshot
-rows) are renumbered to continue the destination's own sequence for that
-market_key, rather than the naive-merge outcomes of silently dropping
-one side's data (INSERT OR IGNORE) or silently overwriting it
-(INSERT OR REPLACE) - both lose real tracked history, which is exactly
-what this script exists to avoid.
+A same-instance_id row is only treated as a genuine collision (and
+renumbered, so both sides' data survive) if its core fields actually
+differ; if they're byte-identical it's skipped outright rather than
+renamed-and-reinserted as if it were new data - two DBs that share
+ancestry (e.g. both descend from an earlier sync) will have plenty of
+already-identical instance_ids, and treating those as fresh collisions
+duplicated ~140 rows the first time this ran for real. Naive
+alternatives (INSERT OR IGNORE / INSERT OR REPLACE) were rejected up
+front since both silently lose real tracked history on a *true*
+collision, which is exactly what this script exists to avoid.
 
-This is meant for a one-time (or infrequent, deliberate) reconciliation,
-not a repeatable sync: re-running with the same source against an
-already-merged dest can reintroduce duplicates for any opportunity that
-collided and was renumbered on a prior run (the renumbered copy no
-longer matches the original instance_id a second pass would look for).
-Run it once per source snapshot.
+Re-running with the same source against an already-merged dest is safe
+for the shared-ancestry case (identical rows are recognized and
+skipped, not re-duplicated). It is NOT safe for a true collision that
+was renumbered on a prior run: the renumbered copy has a different
+instance_id than the original source row, so a second pass won't
+recognize it as already-merged and will renumber-and-insert again.
+Prefer running it once per source snapshot.
 
 Usage: python scripts/merge_databases.py <source_db> <dest_db>
 Merges source_db's rows INTO dest_db in place.
@@ -67,17 +72,54 @@ def merge(source_path: str, dest_path: str) -> dict:
     """)
     counts["event_match_review"] = cur.rowcount
 
-    cur = dest.execute("""
-        INSERT OR IGNORE INTO main.settlement
-            (benchmark_site, benchmark_event_id, market_type, line, selection, outcome, home_goals, away_goals, settled_at, source)
+    # NOT a plain INSERT OR IGNORE: SQLite's UNIQUE constraint never
+    # treats two NULLs as equal, and `line` is NULL for every
+    # match_winner settlement (the majority) - a naive INSERT OR IGNORE
+    # would treat every one of those as "new" and duplicate it even
+    # though it's already present (this is the same NULL-vs-NULL gotcha
+    # vb.storage.save_settlement() already works around; a raw merge
+    # query needs the same NULL-safe existence check, found the hard way
+    # after it silently duplicated 16 settlement rows on a real merge).
+    settlement_inserted = 0
+    for row in dest.execute("""
         SELECT benchmark_site, benchmark_event_id, market_type, line, selection, outcome, home_goals, away_goals, settled_at, source
         FROM src.settlement
-    """)
-    counts["settlement"] = cur.rowcount
+    """).fetchall():
+        site, event_id, market_type, line, selection = row[0], row[1], row[2], row[3], row[4]
+        exists = dest.execute("""
+            SELECT 1 FROM main.settlement
+            WHERE benchmark_site = ? AND benchmark_event_id = ? AND market_type = ?
+              AND (line IS ? OR line = ?) AND selection = ?
+        """, (site, event_id, market_type, line, line, selection)).fetchone()
+        if exists:
+            continue
+        dest.execute("""
+            INSERT INTO main.settlement
+                (benchmark_site, benchmark_event_id, market_type, line, selection, outcome, home_goals, away_goals, settled_at, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, row)
+        settlement_inserted += 1
+    counts["settlement"] = settlement_inserted
 
-    dest_ids = {row[0] for row in dest.execute("SELECT instance_id FROM main.opportunity")}
+    # Keyed on the full core-field tuple, not just instance_id: two DBs
+    # that share ancestry (e.g. both descend from an earlier merge/sync)
+    # will have plenty of instance_ids that already match AND already
+    # hold identical data - those must be skipped outright, not
+    # renamed-and-reinserted as if they were new (found the hard way
+    # after a same-ancestry merge produced ~140 duplicate opportunity
+    # rows this way). Only a same-instance_id row with DIFFERENT core
+    # data is a true collision worth renaming to preserve both sides.
+    existing = {}  # instance_id -> core tuple
+    dest_ids = set()
     next_seq: dict[str, int] = {}
-    for instance_id, market_key in dest.execute("SELECT instance_id, market_key FROM main.opportunity"):
+    for (instance_id, market_key, sport, benchmark_site, comparison_site, market_type,
+         line, selection, first_cross_at, resolved_at, resolution_reason) in dest.execute(
+        "SELECT instance_id, market_key, sport, benchmark_site, comparison_site, market_type, "
+        "line, selection, first_cross_at, resolved_at, resolution_reason FROM main.opportunity"
+    ):
+        dest_ids.add(instance_id)
+        existing[instance_id] = (market_key, sport, benchmark_site, comparison_site, market_type,
+                                  line, selection, first_cross_at, resolved_at, resolution_reason)
         seq = int(instance_id.rsplit("#", 1)[-1])
         next_seq[market_key] = max(next_seq.get(market_key, -1), seq)
 
@@ -87,19 +129,27 @@ def merge(source_path: str, dest_path: str) -> dict:
         FROM src.opportunity
     """).fetchall()
 
-    inserted_opps = inserted_snaps = renamed = 0
+    inserted_opps = inserted_snaps = renamed = skipped_identical = 0
     for (instance_id, market_key, sport, benchmark_site, comparison_site, market_type,
          line, selection, first_cross_at, resolved_at, resolution_reason) in opp_rows:
 
-        final_id = instance_id
-        if final_id in dest_ids:
+        core = (market_key, sport, benchmark_site, comparison_site, market_type,
+                line, selection, first_cross_at, resolved_at, resolution_reason)
+
+        if instance_id in dest_ids:
+            if existing[instance_id] == core:
+                skipped_identical += 1
+                continue  # already present, byte-identical - not a real collision
             next_seq[market_key] = next_seq.get(market_key, -1) + 1
             final_id = f"{market_key}#{next_seq[market_key]}"
             while final_id in dest_ids:
                 next_seq[market_key] += 1
                 final_id = f"{market_key}#{next_seq[market_key]}"
             renamed += 1
+        else:
+            final_id = instance_id
         dest_ids.add(final_id)
+        existing[final_id] = core
 
         dest.execute("""
             INSERT INTO main.opportunity
@@ -126,6 +176,7 @@ def merge(source_path: str, dest_path: str) -> dict:
     counts["opportunity"] = inserted_opps
     counts["opportunity_snapshot"] = inserted_snaps
     counts["opportunity_renamed_on_collision"] = renamed
+    counts["opportunity_skipped_identical"] = skipped_identical
 
     dest.commit()
     dest.execute("DETACH DATABASE src")
