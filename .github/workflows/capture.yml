@@ -34,6 +34,8 @@ jobs:
     # matches) is the long pole here - tens of minutes, vs ~5min for the
     # full-breadth Swisslos sweep and ~2min for the quick cycle.
     timeout-minutes: 65
+    outputs:
+      dashboard-built: ${{ steps.build-dashboard.outcome == 'success' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -64,3 +66,36 @@ jobs:
           else
             python scripts/scheduled_run.py
           fi
+
+      # Every cycle regenerates the dashboard from whatever's in the DB
+      # at that point and republishes it to GitHub Pages - a persistent,
+      # always-fresh URL instead of a manually-regenerated, manually-
+      # republished Claude Artifact. dashboard.html itself is gitignored
+      # (self-contained/embeds JSON data, no reason to commit it) - the
+      # upload-pages-artifact/deploy-pages actions below publish it
+      # straight to Pages hosting without ever needing a git commit.
+      - name: Build dashboard
+        id: build-dashboard
+        run: |
+          mkdir -p public
+          python scripts/build_dashboard.py public/index.html
+
+      - name: Upload dashboard artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy-pages:
+    needs: capture
+    if: needs.capture.outputs.dashboard-built == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
