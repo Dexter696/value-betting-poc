@@ -1,0 +1,193 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Review Queue</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --surface-1: #1a1a19; --surface-2: #232320; --surface-3: #2b2b27; --border: #3a3934;
+    --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #8f8d84;
+    --good: #008300; --bad: #e66767; --accent: #3987e5; --amber: #c98500;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--surface-1); color: var(--text-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    margin: 0; padding: 28px 20px 60px;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  .subtitle { color: var(--text-secondary); font-size: 13px; margin: 0 0 20px; }
+
+  .progress-bar { height: 4px; background: var(--surface-3); border-radius: 2px; overflow: hidden; margin-bottom: 6px; }
+  .progress-fill { height: 100%; background: var(--accent); transition: width 0.2s; }
+  .progress-label { font-size: 12px; color: var(--text-muted); margin-bottom: 20px; display: flex; justify-content: space-between; }
+
+  .card {
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px;
+    padding: 24px; margin-bottom: 16px;
+  }
+  .score-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
+  .score-badge {
+    font-size: 13px; font-weight: 600; padding: 4px 10px; border-radius: 6px;
+    background: color-mix(in srgb, var(--amber) 20%, transparent); color: var(--amber);
+  }
+  .reasons { font-size: 11.5px; color: var(--text-muted); text-align: right; max-width: 60%; }
+
+  .matchup {
+    display: grid; grid-template-columns: 1fr auto 1fr; gap: 16px; align-items: center;
+    margin-bottom: 6px;
+  }
+  .side { background: var(--surface-3); border-radius: 10px; padding: 16px; }
+  .side .site-badge {
+    display: inline-block; font-size: 10.5px; font-weight: 700; letter-spacing: 0.03em;
+    text-transform: uppercase; color: var(--accent); margin-bottom: 10px;
+  }
+  .side .team { font-size: 17px; font-weight: 600; line-height: 1.4; }
+  .side .team .vs { color: var(--text-muted); font-weight: 400; font-size: 13px; display: block; margin: 2px 0; }
+  .side .meta { font-size: 12px; color: var(--text-secondary); margin-top: 10px; }
+  .divider { font-size: 13px; color: var(--text-muted); font-weight: 600; }
+
+  .actions { display: flex; gap: 10px; margin-top: 22px; }
+  button {
+    flex: 1; padding: 14px; border-radius: 8px; border: none; font-size: 14px; font-weight: 600;
+    cursor: pointer; color: white; transition: opacity 0.15s;
+  }
+  button:hover { opacity: 0.85; }
+  button:active { opacity: 0.7; }
+  .btn-reject { background: var(--bad); }
+  .btn-skip { background: var(--surface-3); color: var(--text-secondary); flex: 0.6; }
+  .btn-approve { background: var(--good); }
+  .kbd { font-size: 10px; opacity: 0.75; display: block; margin-top: 2px; font-weight: 400; }
+
+  .empty { text-align: center; padding: 60px 20px; color: var(--text-muted); }
+  .empty .big { font-size: 40px; margin-bottom: 12px; }
+
+  .toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    background: var(--surface-3); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 18px; font-size: 13px; opacity: 0; transition: opacity 0.2s; pointer-events: none;
+  }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Review Queue</h1>
+  <p class="subtitle">Same fixture on both sides? Approve to trust it going forward. Not the same match? Reject. Not sure? Skip — it'll come back around.</p>
+
+  <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+  <div class="progress-label"><span id="progressText">Loading...</span><span id="remainingText"></span></div>
+
+  <div id="content"></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+let queue = [];
+let total = 0;
+let decided = 0;
+
+function fmtTime(iso) {
+  if (!iso) return 'unknown time';
+  const d = new Date(iso);
+  return d.toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+}
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 900);
+}
+
+function renderProgress() {
+  const remaining = queue.length;
+  const pct = total > 0 ? Math.round((decided / total) * 100) : 0;
+  document.getElementById('progressFill').style.width = pct + '%';
+  document.getElementById('progressText').textContent = `${decided} decided`;
+  document.getElementById('remainingText').textContent = `${remaining} left`;
+}
+
+function renderCard() {
+  const el = document.getElementById('content');
+  if (queue.length === 0) {
+    el.innerHTML = `<div class="empty"><div class="big">✓</div>All caught up — nothing left to review.<br>New candidates will appear here as the pipeline finds them.</div>`;
+    return;
+  }
+  const item = queue[0];
+  const bm = item.benchmark, cmp = item.comparison;
+  el.innerHTML = `
+    <div class="card">
+      <div class="score-row">
+        <span class="score-badge">match score ${(item.score * 100).toFixed(0)}%</span>
+        <span class="reasons">${item.reasons.length ? item.reasons.join('; ') : 'no specific flag logged'}</span>
+      </div>
+      <div class="matchup">
+        <div class="side">
+          <span class="site-badge">${bm.site}</span>
+          <div class="team">${bm.home}<span class="vs">vs</span>${bm.away}</div>
+          <div class="meta">${bm.competition || ''}<br>${fmtTime(bm.kickoff)}</div>
+        </div>
+        <div class="divider">=?</div>
+        <div class="side">
+          <span class="site-badge">${cmp.site}</span>
+          <div class="team">${cmp.home}<span class="vs">vs</span>${cmp.away}</div>
+          <div class="meta">${cmp.competition || ''}<br>${fmtTime(cmp.kickoff)}</div>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn-reject" onclick="decide('rejected')">✕ Not the same<span class="kbd">R</span></button>
+        <button class="btn-skip" onclick="skip()">Skip<span class="kbd">S</span></button>
+        <button class="btn-approve" onclick="decide('approved')">✓ Same match<span class="kbd">A</span></button>
+      </div>
+    </div>
+  `;
+}
+
+async function decide(action) {
+  if (queue.length === 0) return;
+  const item = queue.shift();
+  decided++;
+  renderProgress();
+  renderCard();
+  showToast(action === 'approved' ? 'Approved' : 'Rejected');
+  try {
+    await fetch('/api/decide', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: item.id, action }),
+    });
+  } catch (e) {
+    showToast('Error saving — check the server console');
+  }
+}
+
+function skip() {
+  if (queue.length === 0) return;
+  const item = queue.shift();
+  queue.push(item); // comes back around after the rest
+  renderCard();
+  showToast('Skipped for now');
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'a' || e.key === 'A') decide('approved');
+  else if (e.key === 'r' || e.key === 'R') decide('rejected');
+  else if (e.key === 's' || e.key === 'S' || e.key === ' ') { e.preventDefault(); skip(); }
+});
+
+async function load() {
+  const res = await fetch('/api/pending');
+  queue = await res.json();
+  total = queue.length;
+  decided = 0;
+  renderProgress();
+  renderCard();
+}
+
+load();
+</script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+# Data: persisted via GitHub Actions cache during the POC phase, never
+# committed directly - the DB grows continuously and would blow past
+# GitHub's 100MB per-file limit within hours.
+data/*.sqlite
+data/logs/
+data/dashboard.html
+
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Word lock file - contains the editor's real name in plaintext, no
+# reason to publish it.
+~$*.docx
