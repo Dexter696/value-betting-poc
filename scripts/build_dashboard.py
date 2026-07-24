@@ -163,7 +163,15 @@ def collect_data(conn) -> dict:
             "bucket": odds_bucket(opp.snapshots[0].benchmark_odds),
             "firstCrossAt": opp.first_cross_at.astimezone(timezone.utc).isoformat(),
             "resolvedAt": opp.resolved_at.astimezone(timezone.utc).isoformat() if opp.resolved_at else None,
-            "convergenceSeconds": opp.convergence_time.total_seconds() if opp.convergence_time else None,
+            # `is not None`, not truthiness: a zero-duration convergence_time
+            # (entry and resolution landed in the same reading - e.g. kickoff
+            # fell inside a single 5-minute capture gap, so the first
+            # reading that ever saw edge>=3% also saw event_started) is a
+            # real, valid timedelta(0) - but timedelta(0) is falsy in
+            # Python, so `if opp.convergence_time` silently turned 17 real
+            # zero-convergence opportunities (23% of resolved ones, at last
+            # count) into "no data" instead of "0 min".
+            "convergenceSeconds": opp.convergence_time.total_seconds() if opp.convergence_time is not None else None,
             "outcome": outcome.value if outcome else None,
             "settledSource": settled_source,
             "homeGoals": home_goals,
