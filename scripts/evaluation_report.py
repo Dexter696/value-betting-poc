@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from vb.evaluation import DEFAULT_BUCKETS, evaluate
+from vb.evaluation import DEFAULT_BUCKETS, DEFAULT_KELLY_FRACTION, evaluate
 from vb.storage import init_db
 
 DB_PATH = Path(__file__).parent.parent / "data" / "vb.sqlite"
@@ -20,8 +20,9 @@ def _fmt_stats(stats) -> str:
         return "no settled bets yet"
     hit = f"{stats.hit_rate:.0%}" if stats.hit_rate is not None else "n/a"
     return (
-        f"n={stats.n}  avg_edge_a={stats.avg_edge_a:+.1%}  avg_edge_b={stats.avg_edge_b:+.1%}  "
-        f"hit_rate={hit}  flat_roi={stats.flat_roi:+.1%}  profit={stats.total_profit:+.2f}u"
+        f"n={stats.n}  avg_edge_a={stats.avg_edge_a:+.1%}  avg_edge_b={stats.avg_edge_b:+.1%}  hit_rate={hit}\n"
+        f"    flat:  roi={stats.flat_roi:+.1%}  profit={stats.total_profit:+.2f}u  (staked={stats.total_staked:.0f}u)\n"
+        f"    kelly: roi={stats.kelly_roi:+.1%}  profit={stats.total_profit_kelly:+.2f}u  (staked={stats.total_staked_kelly:.2f}u)"
     )
 
 
@@ -29,6 +30,8 @@ def main() -> None:
     conn = init_db(DB_PATH)
     report = evaluate(conn)
 
+    print(f"(kelly scenario uses fractional-Kelly at {DEFAULT_KELLY_FRACTION:.0%} of full Kelly)")
+    print()
     print("=== Overall ===")
     print(f"Method A (all captured bets):        {_fmt_stats(report.overall_a)}")
     print(f"Method B agrees (edge_b >= 3% too):   {_fmt_stats(report.overall_b_agrees)}")

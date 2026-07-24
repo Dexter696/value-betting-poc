@@ -14,10 +14,19 @@ inferred from separately-drawn samples.
 
 Deliberately reads already-settled data (opportunity + settlement) rather
 than computing anything new — same "post-processing, not capture-time"
-philosophy as the rest of this project. Staking/P&L sizing (flat vs
-variance-reduced) is a separate later step per the methodology; this
-module reports flat-stake ROI only, as the simplest evaluation of
-whether the edge signal was real.
+philosophy as the rest of this project.
+
+Per the methodology's "Results calculation" section ("betting 13:1 at the
+same stake as 2:1 inflates variance and biases the test"), two staking
+scenarios are reported side by side, both as post-hoc P&L views over the
+same settled bets rather than anything tracked at capture time:
+  - Flat: every bet the same size (flat_stake_profit).
+  - Variance-reduced: fractional-Kelly-style sizing by odds
+    (kelly_stake_fraction / kelly_stake_profit). Deliberately fractional,
+    not full Kelly — full Kelly is high-variance even with an accurate
+    probability estimate, and Method A's estimate is known to be biased
+    for longshots (see edge.py), so sizing at full Kelly would amplify
+    exactly the bias this evaluation exists to detect.
 """
 
 from __future__ import annotations
@@ -68,6 +77,38 @@ def flat_stake_profit(outcome: SettlementResult, odds: float, stake: float = 1.0
     return _PROFIT_MULTIPLIER[outcome] * stake
 
 
+DEFAULT_KELLY_FRACTION = 0.25  # quarter-Kelly - a common conservative default, see module docstring
+
+
+def kelly_stake_fraction(edge: float, odds: float, kelly_fraction: float = DEFAULT_KELLY_FRACTION) -> float:
+    """Fractional-Kelly stake size, as a fraction of a flat reference unit
+    (so it's directly comparable to flat_stake_profit's stake=1.0).
+
+    Full Kelly is f* = (b*p - q) / b, where b = odds - 1 (net decimal
+    odds) and p/q are win/lose probability. raw_edge() and
+    devigged_edge() already compute exactly the b*p - q numerator against
+    these same comparison odds (see edge.py), so full Kelly reduces to
+    `edge / (odds - 1)` — no separate probability input needed here.
+
+    A negative edge clips to 0 (no bet, not a short — this project only
+    ever considers backing the comparison side that showed value).
+    """
+    if odds <= 1.0:
+        return 0.0
+    full_kelly = edge / (odds - 1.0)
+    return max(0.0, full_kelly * kelly_fraction)
+
+
+def kelly_stake_profit(
+    outcome: SettlementResult, odds: float, edge: float, kelly_fraction: float = DEFAULT_KELLY_FRACTION
+) -> float:
+    """Profit on a fractional-Kelly-sized bet — same settlement math as
+    flat_stake_profit, just with the stake computed from the edge instead
+    of fixed at 1.0."""
+    stake = kelly_stake_fraction(edge, odds, kelly_fraction)
+    return flat_stake_profit(outcome, odds, stake=stake)
+
+
 @dataclass
 class SettledLeg:
     match_key: str
@@ -85,6 +126,15 @@ class SettledLeg:
     @property
     def profit(self) -> float:
         return flat_stake_profit(self.outcome, self.comparison_odds)
+
+    def kelly_profit(self, edge_attr: str, kelly_fraction: float = DEFAULT_KELLY_FRACTION) -> float:
+        """Variance-reduced profit, sized off entry_edge_a or
+        entry_edge_b (`edge_attr` picks which — Method A's own bucket
+        stats size off its own edge, Method B's off its own, so each
+        staking scenario reflects that method's own probability estimate,
+        not the other's)."""
+        edge = getattr(self, edge_attr)
+        return kelly_stake_profit(self.outcome, self.comparison_odds, edge, kelly_fraction)
 
     @property
     def is_win(self) -> Optional[float]:
@@ -111,14 +161,26 @@ class BucketStats:
     flat_roi: float = 0.0
     total_staked: float = 0.0
     total_profit: float = 0.0
+    # Variance-reduced (fractional-Kelly) scenario, same bets, sized by
+    # kelly_stake_fraction instead of a flat 1.0 - total_staked_kelly is
+    # the sum of those per-bet fractions, so kelly_roi stays directly
+    # comparable in scale to flat_roi (both are profit per unit staked).
+    kelly_roi: float = 0.0
+    total_staked_kelly: float = 0.0
+    total_profit_kelly: float = 0.0
 
 
-def _summarize(legs: list[SettledLeg]) -> BucketStats:
+def _summarize(legs: list[SettledLeg], edge_attr: str = "entry_edge_a", kelly_fraction: float = DEFAULT_KELLY_FRACTION) -> BucketStats:
     if not legs:
         return BucketStats(bucket="", n=0)
     hit_values = [leg.is_win for leg in legs if leg.is_win is not None]
     total_profit = sum(leg.profit for leg in legs)
     total_staked = float(len(legs))
+
+    kelly_stakes = [kelly_stake_fraction(getattr(leg, edge_attr), leg.comparison_odds, kelly_fraction) for leg in legs]
+    total_staked_kelly = sum(kelly_stakes)
+    total_profit_kelly = sum(leg.kelly_profit(edge_attr, kelly_fraction) for leg in legs)
+
     return BucketStats(
         bucket=legs[0].bucket,
         n=len(legs),
@@ -128,6 +190,9 @@ def _summarize(legs: list[SettledLeg]) -> BucketStats:
         flat_roi=total_profit / total_staked if total_staked else 0.0,
         total_staked=total_staked,
         total_profit=total_profit,
+        kelly_roi=(total_profit_kelly / total_staked_kelly) if total_staked_kelly else 0.0,
+        total_staked_kelly=total_staked_kelly,
+        total_profit_kelly=total_profit_kelly,
     )
 
 
@@ -140,10 +205,14 @@ class EvaluationReport:
     excluded_unsettled_or_unmatched: int = 0
 
 
-def evaluate(conn: sqlite3.Connection, buckets=DEFAULT_BUCKETS) -> EvaluationReport:
+def evaluate(conn: sqlite3.Connection, buckets=DEFAULT_BUCKETS, kelly_fraction: float = DEFAULT_KELLY_FRACTION) -> EvaluationReport:
     """Load every settled opportunity leg and compare Method A's own
     stats against the subset where Method B also would have flagged it —
-    per bucket and overall.
+    per bucket and overall. Each BucketStats carries both staking
+    scenarios (flat_roi and kelly_roi); the Kelly scenario for the "A"
+    stats sizes off Method A's own edge, and for the "B agrees" stats off
+    Method B's own edge - each method's variance-reduced P&L reflects its
+    own probability estimate, not the other's.
     """
     from .storage import load_opportunity
 
@@ -188,12 +257,12 @@ def evaluate(conn: sqlite3.Connection, buckets=DEFAULT_BUCKETS) -> EvaluationRep
     by_bucket_a = {}
     by_bucket_b = {}
     for label, _low, _high in buckets:
-        by_bucket_a[label] = _summarize([leg for leg in all_legs if leg.bucket == label])
-        by_bucket_b[label] = _summarize([leg for leg in b_agrees if leg.bucket == label])
+        by_bucket_a[label] = _summarize([leg for leg in all_legs if leg.bucket == label], "entry_edge_a", kelly_fraction)
+        by_bucket_b[label] = _summarize([leg for leg in b_agrees if leg.bucket == label], "entry_edge_b", kelly_fraction)
 
     return EvaluationReport(
-        overall_a=_summarize(all_legs),
-        overall_b_agrees=_summarize(b_agrees),
+        overall_a=_summarize(all_legs, "entry_edge_a", kelly_fraction),
+        overall_b_agrees=_summarize(b_agrees, "entry_edge_b", kelly_fraction),
         by_bucket_a=by_bucket_a,
         by_bucket_b_agrees=by_bucket_b,
         excluded_unsettled_or_unmatched=excluded,

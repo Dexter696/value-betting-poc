@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from vb.evaluation import evaluate, flat_stake_profit, odds_bucket
+from vb.evaluation import evaluate, flat_stake_profit, kelly_stake_fraction, kelly_stake_profit, odds_bucket
 from vb.models import MarketType, RawEvent, Selection
 from vb.opportunity import LegReading, OpportunityTracker
 from vb.settlement import SettlementResult
@@ -36,6 +36,30 @@ def test_flat_stake_profit_half_won():
 
 def test_flat_stake_profit_half_lost():
     assert flat_stake_profit(SettlementResult.HALF_LOST, 3.0) == -0.5
+
+
+def test_kelly_stake_fraction_matches_hand_computed_full_kelly_scaled_down():
+    # full Kelly = edge / (odds - 1) = 0.05 / 1.0 = 0.05; quarter-Kelly = 0.0125
+    assert round(kelly_stake_fraction(0.05, 2.0, kelly_fraction=0.25), 6) == 0.0125
+
+
+def test_kelly_stake_fraction_negative_edge_clips_to_zero():
+    # a negative edge must never produce a short (negative stake)
+    assert kelly_stake_fraction(-0.02, 3.0) == 0.0
+
+
+def test_kelly_stake_fraction_zero_at_odds_of_one():
+    assert kelly_stake_fraction(0.10, 1.0) == 0.0
+
+
+def test_kelly_stake_profit_won():
+    # stake = (0.08 / 1.5) * 0.25 = 0.013333...; profit = stake * (odds - 1) = 0.02
+    assert round(kelly_stake_profit(SettlementResult.WON, 2.5, edge=0.08, kelly_fraction=0.25), 6) == 0.02
+
+
+def test_kelly_stake_profit_lost_is_negative_stake_not_flat_unit():
+    stake = kelly_stake_fraction(0.08, 2.5, kelly_fraction=0.25)
+    assert round(kelly_stake_profit(SettlementResult.LOST, 2.5, edge=0.08, kelly_fraction=0.25), 6) == round(-stake, 6)
 
 
 def _insert_settled_leg(conn, event_id, home, away, benchmark_odds, comparison_odds, edge_a, edge_b, outcome, home_goals, away_goals):
@@ -112,6 +136,37 @@ def test_evaluate_empty_bucket_has_none_hit_rate(tmp_path):
 
     assert report.by_bucket_a["mid"].n == 0
     assert report.by_bucket_a["mid"].hit_rate is None
+
+
+def test_evaluate_kelly_scenario_sizes_a_and_b_off_their_own_edge(tmp_path):
+    conn = init_db(tmp_path / "vb.sqlite")
+    # Method A and B disagree sharply on edge for the same bet - each
+    # scenario's Kelly stake must reflect its own method's edge, not the
+    # other's, or the whole point of comparing the two is lost.
+    _insert_settled_leg(conn, "e1", "A", "B", 1.8, 1.9, 0.05, 0.20, SettlementResult.WON, 2, 0)
+
+    report = evaluate(conn, kelly_fraction=0.25)
+    fav_a = report.by_bucket_a["favorite"]
+    fav_b = report.by_bucket_b_agrees["favorite"]
+
+    expected_stake_a = kelly_stake_fraction(0.05, 1.9, kelly_fraction=0.25)
+    expected_stake_b = kelly_stake_fraction(0.20, 1.9, kelly_fraction=0.25)
+
+    assert round(fav_a.total_staked_kelly, 6) == round(expected_stake_a, 6)
+    assert round(fav_b.total_staked_kelly, 6) == round(expected_stake_b, 6)
+    assert fav_a.total_staked_kelly != fav_b.total_staked_kelly
+
+
+def test_evaluate_kelly_roi_matches_flat_roi_scale_for_a_single_win(tmp_path):
+    conn = init_db(tmp_path / "vb.sqlite")
+    _insert_settled_leg(conn, "e1", "A", "B", 1.8, 1.9, 0.05, 0.04, SettlementResult.WON, 2, 0)
+
+    report = evaluate(conn)
+    fav_a = report.by_bucket_a["favorite"]
+
+    # a single winning bet: kelly_roi is profit-per-unit-staked just like
+    # flat_roi, and since it's the only bet, both reduce to (odds - 1)
+    assert round(fav_a.kelly_roi, 6) == round(fav_a.flat_roi, 6) == 0.9
 
 
 def test_evaluate_push_excluded_from_hit_rate_but_counted(tmp_path):
