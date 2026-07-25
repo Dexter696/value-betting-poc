@@ -64,7 +64,7 @@ Everything left of "opportunity" runs every 5 minutes (plus two slower supplemen
 - Two endpoints: `/leagues/{id}/matchups` (event list) and `/leagues/{id}/markets/straight` (prices). Markets are moneyline → `MATCH_WINNER`, spread → `ASIAN_HANDICAP`, total → `TOTALS`. Only `period == 0` (full match) is read; team totals and 1st/2nd-half markets are not modeled.
 - Odds arrive in American format and are converted to decimal (`_decimal_odds`).
 - `max_bet_size` comes directly from Pinnacle's own published `maxRiskStake` limit — no inference needed.
-- **Known quirk (not a bug):** Pinnacle issues a **new, distinct `event_id`** for the same real-world fixture once it goes in-play, separate from the pre-match id. Confirmed by timing analysis during this session's duplicate-bet investigation. This causes `raw_event`/`raw_market_snapshot` rows to legitimately multiply per real match — but in every case checked, the in-play id's market never independently crossed the 3% threshold (Pinnacle typically pulls a match from the pre-match feed at kickoff, and the opportunity tracker closes on wall-clock kickoff time regardless — see §7), so this does not create duplicate *opportunities* or duplicate bets, only extra raw capture rows.
+- **Known quirk (not a bug):** Pinnacle issues a **new, distinct `event_id`** for the same real-world fixture once it goes in-play, separate from the pre-match id. Confirmed by timing analysis during this session's duplicate-bet investigation. This causes `raw_event`/`raw_market_snapshot` rows to legitimately multiply per real match — but in every case checked, the in-play id's market never independently crossed the 3% threshold (Pinnacle typically pulls a match from the pre-match feed at kickoff, and the opportunity tracker closes on wall-clock kickoff time regardless — see §6.1), so this does not create duplicate *opportunities* or duplicate bets, only extra raw capture rows.
 
 ### 3.2 Swisslos.ch (`vb/sources/swisslos.py`) — comparison site #1
 
@@ -119,12 +119,12 @@ total = 0.70 * team_name_score + 0.15 * competition_name_score + 0.15 * time_sco
 
 ## 5. Edge calculation — Method A vs Method B (`vb/edge.py`)
 
-Both methods are computed for **every** matched leg, every cycle — which one to trust is a post-processing decision (per the project's core philosophy), not a capture-time filter. Only Method A's crossing of 3% ever triggers opportunity tracking (see §7); Method B's edge is stored alongside it for later comparison.
+Both methods are computed for **every** matched leg, every cycle — which one to trust is a post-processing decision (per the project's core philosophy), not a capture-time filter. Only Method A's crossing of 3% ever triggers opportunity tracking (see §6.1); Method B's edge is stored alongside it for later comparison.
 
 - **Method A (`raw_edge`)**: treats the benchmark's own published odds for that specific leg as if they were the fair price (ignoring the benchmark's own margin/vig). `edge = comparison_odds / benchmark_odds − 1`. Simple, but **systematically over-flags longshots** as value, because bookmakers typically load their margin disproportionately onto long odds (favorite-longshot bias) — so a longshot's raw implied probability is inflated more than a favorite's, making Method A structurally biased toward false positives on the longshot end.
 - **Method B (`devigged_edge`)**: first removes the benchmark **market's** entire overround (not just the one leg — needs all outcomes) via proportional de-vig (`devig_proportional`: scale each outcome's implied probability down so they sum to exactly 1.0), then computes edge against that de-vigged fair probability. This corrects the *overall margin* but explicitly does **not** itself correct favorite-longshot bias — that correction is what the bucketed Method A vs Method B comparison in `vb/evaluation.py` exists to surface, not something baked into Method B's formula.
 
-The dashboard's threshold slider (§13) currently applies to **Method A only** — an explicit, deliberate scope decision (see §13.2), not an oversight.
+The dashboard's threshold slider (§12) currently applies to **Method A only** — an explicit, deliberate scope decision (see §12.2), not an oversight.
 
 ---
 
@@ -150,9 +150,9 @@ This came up repeatedly during development and is the single most important mode
 
 - **`resolved_at` being set** means only that the *tracking* of that edge crossing stopped, for one of the three reasons above. It says **nothing** about whether the real-world match has finished, and nothing about whether a bet placed there would have been resolved yet.
 - **`DROPPED_BELOW_THRESHOLD` and `MARKET_SUSPENDED` do not mean the match started or ended** — they can happen hours before kickoff, simply because the price gap closed (the very thing a value bettor would expect: soft books often correct toward the sharp price over time).
-- **The betting hypothesis governing this project**: as soon as the edge crosses 3%, we assume a bet *could* have been placed at that price and stake — the entry is the crossing itself, independent of how long the window stayed open afterward. A `DROPPED_BELOW_THRESHOLD` resolution after 4 minutes is exactly as "bettable" as one that stayed open for 3 hours; **entry timing is the crossing, not the duration of the window** (this is the resolution of the user's explicit question "why do you consider those that dropped below threshold as we did not bet? time slot was too short?" — the answer is: they should *not* be excluded, and after this discussion the evaluation logic (§9) treats every crossing as a bet regardless of how it later resolved).
-- **`is_open` staying `True` past kickoff is a real, acknowledged gap, not a bug**: once a match kicks off, Pinnacle removes it from its live-odds feed entirely — no more readings ever arrive for that leg. The tracker only closes an opportunity when it *receives* a new reading showing suspension/drop/kickoff; if Pinnacle stops sending anything at all, the tracker never gets that chance. `run_cycle()` (`vb/pipeline.py:198`) works around most of this by computing `event_started` from **wall-clock time**, independent of whether Pinnacle's feed is still returning fresh data — but see §16.2 for the residual edge case this doesn't fully close.
-- **Settlement is a completely separate mechanism**, keyed only on `(benchmark_site, benchmark_event_id, market_type, line, selection)` — it doesn't care about opportunity tracking state at all, doesn't require `resolved_at` to be set, and reads the real final score from ESPN or manual entry once the actual match is over (see §8). A closed-but-unsettled opportunity and a still-open-but-actually-finished opportunity are both real, distinguishable states the dashboard surfaces separately.
+- **The betting hypothesis governing this project**: as soon as the edge crosses 3%, we assume a bet *could* have been placed at that price and stake — the entry is the crossing itself, independent of how long the window stayed open afterward. A `DROPPED_BELOW_THRESHOLD` resolution after 4 minutes is exactly as "bettable" as one that stayed open for 3 hours; **entry timing is the crossing, not the duration of the window** (this is the resolution of the user's explicit question "why do you consider those that dropped below threshold as we did not bet? time slot was too short?" — the answer is: they should *not* be excluded, and after this discussion the evaluation logic (§8) treats every crossing as a bet regardless of how it later resolved).
+- **`is_open` staying `True` past kickoff is a real, acknowledged gap, not a bug**: once a match kicks off, Pinnacle removes it from its live-odds feed entirely — no more readings ever arrive for that leg. The tracker only closes an opportunity when it *receives* a new reading showing suspension/drop/kickoff; if Pinnacle stops sending anything at all, the tracker never gets that chance. `run_cycle()` (`vb/pipeline.py:198`) works around most of this by computing `event_started` from **wall-clock time**, independent of whether Pinnacle's feed is still returning fresh data — but see §15.2 for the residual edge case this doesn't fully close.
+- **Settlement is a completely separate mechanism**, keyed only on `(benchmark_site, benchmark_event_id, market_type, line, selection)` — it doesn't care about opportunity tracking state at all, doesn't require `resolved_at` to be set, and reads the real final score from ESPN or manual entry once the actual match is over (see §7). A closed-but-unsettled opportunity and a still-open-but-actually-finished opportunity are both real, distinguishable states the dashboard surfaces separately.
 
 ### 6.3 Per-opportunity derived fields
 
@@ -161,7 +161,7 @@ Computed as `@property` methods on `Opportunity` (`vb/opportunity.py:100-128`), 
 - `entry_edge_a` / `entry_edge_b`: the **first** snapshot's edge (the crossing moment).
 - `peak_edge_a` / `peak_snapshot`: the highest edge ever observed during the open period.
 - `time_to_peak`: peak snapshot's timestamp minus `first_cross_at`.
-- `convergence_time`: `resolved_at − first_cross_at` **if `resolved_at is not None`** — see §15.1 for a real bug this exact line once had.
+- `convergence_time`: `resolved_at − first_cross_at` **if `resolved_at is not None`** — see §14.1 for a real bug this exact line once had.
 
 ### 6.4 Movement attribution
 
@@ -198,7 +198,7 @@ Given `(market_type, line, selection)` and a final score, `settle()` dispatches 
 
 ### 7.3 Manual fallback
 
-`scripts/record_result.py` + a human looking up the score (used for leagues ESPN doesn't cover, and any auto-settle miss). `record_match_result()` (`vb/storage.py:456`) settles **every** distinct `(market_type, line, selection)` combination ever tracked as an opportunity for that benchmark event in one call — a human supplies the final score once per match, not once per leg.
+`scripts/record_result.py` + a human looking up the score (used for leagues ESPN doesn't cover, and any auto-settle miss). `record_match_result()` (`vb/storage.py:514`) settles **every** distinct `(market_type, line, selection)` combination ever tracked as an opportunity for that benchmark event in one call — a human supplies the final score once per match, not once per leg.
 
 ### 7.4 What triggers the settlement worklist
 
@@ -222,16 +222,16 @@ Reads only already-settled data — computes nothing new, same "post-processing,
 
 ## 9. Database schema (`vb/schema.sql`)
 
-Five tables, SQLite:
+Six tables, SQLite:
 
 | Table | Role | Key design notes |
 |---|---|---|
 | `raw_event` | One row per (site, event_id) — static match metadata. | PK `(site, event_id)`. Upserted, never duplicated. |
-| `raw_market_snapshot` | Every market reading, every cycle, regardless of edge. | The literal time series; unbounded growth (see §11.3 pruning). No uniqueness constraint — natural key for dedup purposes is `(site, event_id, market_type, line, captured_at)`, enforced only by application logic (`merge_databases.py`), not a DB constraint. |
+| `raw_market_snapshot` | Every market reading, every cycle, regardless of edge. | The literal time series; unbounded growth (see §10.3 pruning). No uniqueness constraint — natural key for dedup purposes is `(site, event_id, market_type, line, captured_at)`, enforced only by application logic (`merge_databases.py`), not a DB constraint. |
 | `opportunity` | One header row per continuous above-3%-threshold period. | PK `instance_id` (`"{market_key}#{seq}"`). `market_key` groups re-occurrences but is *not* unique per row. `CHECK` constraint on `resolution_reason`. |
 | `opportunity_snapshot` | One row per capture cycle while an opportunity was open. | FK to `opportunity.instance_id`. Carries both edge methods, both books' odds, movement attribution, and the full multi-outcome market JSON for both sides of that particular comparison (not all 4 books at once — see `vb/pipeline.py:93-111`). |
 | `event_match_review` | Human review queue for REVIEW-tier event matches. | `UNIQUE(benchmark_site, benchmark_event_id, comparison_site, comparison_event_id)`. `status` never touched by the pipeline once a human has set it. |
-| `settlement` | Final result per `(benchmark_site, benchmark_event_id, market_type, line, selection)`. | **Deliberately not tied to any comparison site or opportunity instance** — the real-world outcome doesn't depend on which book's odds were being compared, so one settlement row serves every opportunity across every comparison site for that leg. **Critical SQLite gotcha handled explicitly**: the `UNIQUE` constraint includes a nullable `line` column (NULL for every match-winner leg), and standard SQL/SQLite never treats two NULLs as equal even under a UNIQUE index — so `INSERT ... ON CONFLICT` and naive `INSERT OR IGNORE` **both silently fail to dedupe** NULL-line rows. `save_settlement()` (`vb/storage.py:344`) works around this with an explicit `UPDATE` first, `INSERT` only if `rowcount == 0`, using `(line IS ? OR line = ?)` in the `WHERE` clause. The same fix had to be independently re-applied in `merge_databases.py` after it was found the hard way (see §15.2). |
+| `settlement` | Final result per `(benchmark_site, benchmark_event_id, market_type, line, selection)`. | **Deliberately not tied to any comparison site or opportunity instance** — the real-world outcome doesn't depend on which book's odds were being compared, so one settlement row serves every opportunity across every comparison site for that leg. **Critical SQLite gotcha handled explicitly**: the `UNIQUE` constraint includes a nullable `line` column (NULL for every match-winner leg), and standard SQL/SQLite never treats two NULLs as equal even under a UNIQUE index — so `INSERT ... ON CONFLICT` and naive `INSERT OR IGNORE` **both silently fail to dedupe** NULL-line rows. `save_settlement()` (`vb/storage.py:344`) works around this with an explicit `UPDATE` first, `INSERT` only if `rowcount == 0`, using `(line IS ? OR line = ?)` in the `WHERE` clause. The same fix had to be independently re-applied in `merge_databases.py` after it was found the hard way (see §14.2). |
 
 ---
 
@@ -247,11 +247,11 @@ One call per (benchmark, comparison) site pair, per cycle:
 
 ### 10.2 `scripts/scheduled_run.py` — the actual scheduled entry point
 
-Each of the three sites' capture is wrapped in its own `try/except` so one scraper breaking (network hiccup, DOM change) never blocks the others or the pipeline. Sequence per cycle: capture (mode depends on which cron fired — quick / full-Swisslos / full-handicaps, see §11.1) → `run_cycle()` against both comparison sites → `auto_settle()` (ESPN) → `prune_raw_snapshots()` (+ `VACUUM` if anything was deleted). Logs to `data/logs/scheduler.log` and stdout.
+Each of the three sites' capture is wrapped in its own `try/except` so one scraper breaking (network hiccup, DOM change) never blocks the others or the pipeline. Sequence per cycle: capture (mode depends on which cron fired — quick / full-Swisslos / full-handicaps, see §11.1) → `run_cycle()` against both comparison sites → `force_resolve_stale()` (the `force_resolve_stale_opportunities()` safety net, §15.2 — added 2026-07-25, after this description was first written) → `auto_settle()` (ESPN) → `prune_raw_snapshots()` (+ `VACUUM` if anything was deleted). Logs to `data/logs/scheduler.log` and stdout.
 
-### 10.3 Raw-snapshot pruning (`prune_raw_snapshots`, `vb/storage.py:488`)
+### 10.3 Raw-snapshot pruning (`prune_raw_snapshots`, `vb/storage.py:546`)
 
-Deletes `raw_market_snapshot` rows older than 24h, **except** each `(site, event_id, market_type, line)`'s single latest row, which is kept regardless of age (the live pipeline only ever reads the latest row per key). Exists because unbounded 5-minute-cadence capture reached **580k+ rows / 150+ MB in under 24h** during development — unsurvivable for unattended capture on constrained storage. `opportunity`, `opportunity_snapshot`, and `settlement` rows — the actually meaningful, non-reconstructible data — are **never** touched by this function. This is the one place in the system that deliberately deletes anything, and it is scoped as narrowly as possible in service of the standing "never lose data" directive (§14).
+Deletes `raw_market_snapshot` rows older than 24h, **except** each `(site, event_id, market_type, line)`'s single latest row, which is kept regardless of age (the live pipeline only ever reads the latest row per key). Exists because unbounded 5-minute-cadence capture reached **580k+ rows / 150+ MB in under 24h** during development — unsurvivable for unattended capture on constrained storage. `opportunity`, `opportunity_snapshot`, and `settlement` rows — the actually meaningful, non-reconstructible data — are **never** touched by this function. This is the one place in the system that deliberately deletes anything, and it is scoped as narrowly as possible in service of the standing "never lose data" directive (§11.2).
 
 ---
 
@@ -276,7 +276,7 @@ This is the direct implementation of the user's explicit standing instruction (v
 - The live DB (`data/vb.sqlite`) is **never committed to git** — it grows continuously and would blow past GitHub's 100 MB per-file limit within hours. Instead it's kept in **GitHub Actions cache** (`actions/cache@v4`), keyed uniquely per run (`vb-db-${{ github.run_id }}`) with a prefix-matching restore key (`vb-db-`) so each run restores the most recent prior cache entry and re-saves under its own new key — an append-then-rotate pattern, not a fixed slot.
 - **The cache alone was judged insufficient** for a "never lose data" guarantee: Actions cache is LRU-evicted, has no audit trail, and no recovery path if a write silently fails. A **separate, durable daily backup** was added: `gh release upload db-sync data/vb.sqlite --clobber`, piggybacked on the once-daily `13 3 * * *` cron (not every 5 minutes — a full-DB release upload isn't free, and daily recovery-point granularity was judged sufficient for a last-resort backup). Release assets are **not** subject to cache eviction at all, so this is a meaningfully different failure mode from the cache, not just a second copy of the same risk.
 - `workflow_dispatch` exposes a manual `db_sync` input (`none`/`export`/`import`) for reconciling local and GitHub-side data when they diverge — `export` uploads the current cached DB as a downloadable build artifact; `import` pulls the `db-sync` release asset and uses it going forward. Both skip the normal capture cycle for that one run.
-- **Local/GitHub reconciliation tooling** (`scripts/merge_databases.py`) was purpose-built for additively merging the two independently-run capture streams (local PC + GitHub Actions) — see §15.2 for real bugs found and fixed in this exact tool via production use.
+- **Local/GitHub reconciliation tooling** (`scripts/merge_databases.py`) was purpose-built for additively merging the two independently-run capture streams (local PC + GitHub Actions) — see §14.2/§14.3 for real bugs found and fixed in this exact tool via production use.
 
 ### 11.3 Dashboard auto-deployment
 
@@ -327,7 +327,7 @@ Three groups, restructured mid-session for clarity: **Data Collection** (raw cap
 Per the standing directive quoted in §11.2, three purpose-built tools exist specifically to prevent silent data loss when local and GitHub-side databases (two independently-running capture streams) diverge:
 
 - **`scripts/merge_databases.py`**: additive merge, dedupes on each table's *real* natural key (never a raw autoincrement id, which has no cross-database meaning). `opportunity.instance_id` is the hard case: deterministic within one DB, not guaranteed unique across two independently-run ones. A same-`instance_id` collision is only renamed-and-reinserted (preserving both sides' data) if the incoming row's **core fields actually differ** from what's already present; if they're byte-identical, it's recognized as shared-ancestry and skipped outright.
-- **`scripts/dedupe_after_bad_merge.py`**: one-off cleanup for data already corrupted by a real bug in the merge tool before it was fixed (§15.2) — removes only exact duplicates, safe to re-run.
+- **`scripts/dedupe_after_bad_merge.py`**: one-off cleanup for data already corrupted by a real bug in the merge tool before it was fixed (§14.2) — removes only exact duplicates, safe to re-run.
 - **GitHub release backup** (§11.2): durable, cache-eviction-immune daily snapshot.
 
 ---
