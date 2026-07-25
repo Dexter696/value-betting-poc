@@ -199,13 +199,20 @@
     <span class="note">Recalculates everything below (tiles, table, simulator) as if we only bet when edge A reaches this level, using each opportunity's own captured trajectory - not a re-scrape. Method A only for now.</span>
   </div>
 
+  <div class="threshold-bar">
+    <label for="convergenceThreshold">Min. converge time</label>
+    <input type="range" id="convergenceThreshold" min="5" max="180" step="5" value="5" />
+    <span class="tval" id="convergenceVal">5m</span>
+    <span class="note">Same idea as entry threshold, applied to converge time instead of edge: excludes any opportunity whose observed window (first cross &rarr; close) was shorter than this - including still-open ones, since their eventual converge time isn't known yet. Combines with entry threshold (both must pass).</span>
+  </div>
+
   <div class="tile-group">
     <div class="tile-group-label">Data collection</div>
     <div class="tiles" id="tilesData"></div>
   </div>
 
   <div class="tile-group">
-    <div class="tile-group-label">Betting activity (Method A, at current threshold)</div>
+    <div class="tile-group-label">Betting activity (Method A, at current threshold + converge filter)</div>
     <div class="tiles" id="tilesBetting"></div>
     <div class="tiles" id="tilesBettingSecondary" style="margin-top:6px"></div>
   </div>
@@ -441,7 +448,7 @@ function legPnl(opp, mode, flatStake, kellyFraction) {
 const state = {
   search: '', dateFrom: null, dateTo: null,
   market: 'all', site: 'all', bucket: 'all', outcome: 'all', minEdge: null,
-  threshold: 0.03, mode: 'flat', flatStake: 1.0, kellyFraction: 0.25,
+  threshold: 0.03, minConvergenceMinutes: 5, mode: 'flat', flatStake: 1.0, kellyFraction: 0.25,
   sortKey: 'kickoff', sortDir: 'desc',
 };
 
@@ -450,8 +457,18 @@ const state = {
 // table, simulator) is scoped to this set.
 function qualifiesAtThreshold(opp) { return getEntry(opp) !== null; }
 
+// Still-open opportunities have convergenceSeconds === null (their
+// eventual converge time isn't known yet) - those never pass a minimum
+// converge-time filter, same "can't include what we don't know yet"
+// logic as qualifiesAtThreshold() above.
+function qualifiesAtConvergence(opp) {
+  return opp.convergenceSeconds !== null && opp.convergenceSeconds !== undefined
+    && opp.convergenceSeconds >= state.minConvergenceMinutes * 60;
+}
+
 function passesFilters(opp) {
   if (!qualifiesAtThreshold(opp)) return false;
+  if (!qualifiesAtConvergence(opp)) return false;
   if (state.search) {
     const hay = `${opp.home} ${opp.away} ${opp.competition}`.toLowerCase();
     if (!hay.includes(state.search)) return false;
@@ -485,10 +502,11 @@ function renderTiles() {
   `;
 
   // Betting-activity tiles are scoped to whatever qualifies at the
-  // CURRENT threshold - not DATA.stats' fixed 3% counts, and not
-  // affected by the other filters (date/market/site/etc) below, so
-  // they always answer "at this threshold, across everything captured".
-  const qualifying = DATA.opportunities.filter(qualifiesAtThreshold);
+  // CURRENT threshold AND converge-time filter - not DATA.stats' fixed
+  // 3% counts, and not affected by the other filters (date/market/
+  // site/etc) below, so they always answer "at this threshold and
+  // minimum converge time, across everything captured".
+  const qualifying = DATA.opportunities.filter(o => qualifiesAtThreshold(o) && qualifiesAtConvergence(o));
   const settled = qualifying.filter(o => o.outcome);
   const awaiting = qualifying.length - settled.length;
   const resolved = qualifying.filter(o => !o.isOpen).length;
@@ -510,7 +528,11 @@ function renderTiles() {
     return { n: legs.length, hitRate, roi };
   };
   const a = statsFor(settled, l => getEntry(l).edgeA, l => getEntry(l).comparisonOdds);
-  const bLegs = DATA.opportunities.filter(o => o.outcome && methodBAgrees(o));
+  // Method B stays fixed at the original 3% capture threshold (not
+  // threshold-adjustable, see the entry-threshold note), but converge
+  // time isn't method-specific - it's the same observed window for A
+  // and B on the same opportunity - so the converge filter still applies.
+  const bLegs = DATA.opportunities.filter(o => o.outcome && methodBAgrees(o) && qualifiesAtConvergence(o));
   const b = statsFor(bLegs, l => l.entryEdgeB, l => l.entryComparisonOdds);
   document.getElementById('tilesMethod').innerHTML = `
     <div class="tile"><div class="value">${a.n} / ${a.hitRate !== null ? (a.hitRate*100).toFixed(0)+'%' : 'n/a'}</div><div class="label">Method A (threshold ${(state.threshold*100).toFixed(1)}%): settled bets / hit rate</div></div>
@@ -803,6 +825,11 @@ function render() {
 document.getElementById('entryThreshold').addEventListener('input', e => {
   state.threshold = parseFloat(e.target.value) / 100;
   document.getElementById('thresholdVal').textContent = parseFloat(e.target.value).toFixed(1) + '%';
+  render();
+});
+document.getElementById('convergenceThreshold').addEventListener('input', e => {
+  state.minConvergenceMinutes = parseFloat(e.target.value);
+  document.getElementById('convergenceVal').textContent = e.target.value + 'm';
   render();
 });
 document.getElementById('search').addEventListener('input', e => { state.search = e.target.value.trim().toLowerCase(); render(); });
