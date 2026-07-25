@@ -201,9 +201,9 @@
 
   <div class="threshold-bar">
     <label for="convergenceThreshold">Min. converge time</label>
-    <input type="range" id="convergenceThreshold" min="5" max="180" step="5" value="5" />
+    <input type="range" id="convergenceThreshold" min="0" max="180" step="5" value="5" />
     <span class="tval" id="convergenceVal">5m</span>
-    <span class="note">Same idea as entry threshold, applied to converge time instead of edge: excludes any opportunity whose observed window (first cross &rarr; close) was shorter than this - including still-open ones, since their eventual converge time isn't known yet. Combines with entry threshold (both must pass).</span>
+    <span class="note">Same idea as entry threshold, applied to converge time instead of edge: excludes any opportunity whose observed window (first cross &rarr; close) was shorter than this - including still-open ones, since their eventual converge time isn't known yet. Drag to 0 (left edge) to turn this off and see everything, including still-open bets. Combines with entry threshold (both must pass).</span>
   </div>
 
   <div class="tile-group">
@@ -457,11 +457,14 @@ const state = {
 // table, simulator) is scoped to this set.
 function qualifiesAtThreshold(opp) { return getEntry(opp) !== null; }
 
-// Still-open opportunities have convergenceSeconds === null (their
-// eventual converge time isn't known yet) - those never pass a minimum
-// converge-time filter, same "can't include what we don't know yet"
+// At the slider's minimum (0 = "off"), everything passes, including
+// still-open opportunities - this is the only way to see an unfiltered
+// view, so it must stay reachable. Above 0, still-open opportunities
+// (convergenceSeconds === null - their eventual converge time isn't
+// known yet) never pass, same "can't include what we don't know yet"
 // logic as qualifiesAtThreshold() above.
 function qualifiesAtConvergence(opp) {
+  if (state.minConvergenceMinutes <= 0) return true;
   return opp.convergenceSeconds !== null && opp.convergenceSeconds !== undefined
     && opp.convergenceSeconds >= state.minConvergenceMinutes * 60;
 }
@@ -829,7 +832,7 @@ document.getElementById('entryThreshold').addEventListener('input', e => {
 });
 document.getElementById('convergenceThreshold').addEventListener('input', e => {
   state.minConvergenceMinutes = parseFloat(e.target.value);
-  document.getElementById('convergenceVal').textContent = e.target.value + 'm';
+  document.getElementById('convergenceVal').textContent = e.target.value === '0' ? 'off' : e.target.value + 'm';
   render();
 });
 document.getElementById('search').addEventListener('input', e => { state.search = e.target.value.trim().toLowerCase(); render(); });

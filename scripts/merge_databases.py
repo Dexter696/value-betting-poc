@@ -1,7 +1,20 @@
-"""Merge one SQLite DB's data into another, additively (never deletes or
-overwrites an existing row's data) - built for reconciling the local and
-GitHub-side vb.sqlite databases, which have run as two independent
-capture streams and diverged.
+"""Merge one SQLite DB's data into another - built for reconciling the
+local and GitHub-side vb.sqlite databases, which have run as two
+independent capture streams and diverged.
+
+The core row-by-row merge (raw_event/raw_market_snapshot/
+event_match_review/settlement, and the opportunity/opportunity_snapshot
+insert-or-rename logic below) is additive: it only ever inserts,
+never deletes or overwrites an existing row's data. BUT `merge()` as a
+whole is NOT purely additive - see the 2026-07-25 bug note further
+down: it unconditionally runs reconcile_opportunity_groups()/
+reconcile_snapshot_duplicates() at the end, and those DO delete rows
+(including pre-existing duplicate groups in dest that predate this
+particular merge call, not just rows this merge just inserted). Do not
+rely on merge() as a whole being side-effect-free / safe to call
+speculatively without a backup - it is a deliberate, documented
+exception to the "additive only" rule below, not an oversight, but it
+is real deletion.
 
 Dedupes on each table's real natural key rather than raw autoincrement
 ids, which have no meaning across two independently-created databases:
