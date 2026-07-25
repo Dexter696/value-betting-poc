@@ -82,6 +82,12 @@ _STOPWORD_TOKENS = {
     "fc", "cf", "ac", "sc", "sk", "fk", "cd", "ss", "us", "asd", "ssd",
     "ubc", "afc", "cfc", "club", "calcio", "futbol", "football",
     "bsc", "tsv", "vfl", "vfb", "sv", "fsv",
+    # Nordic (Swedish/Norwegian) club-suffix abbreviations, same category
+    # as "sk"/"fk" above - "if" = Idrottsforening, "is" = Idrottssallskap.
+    # Found via a real miss: ESPN's "Orgryte IS" vs Pinnacle's "Orgryte"
+    # scored 82/100 (below the 88 settlement safety bar) purely because of
+    # this untranslated suffix, even though it was otherwise an exact match.
+    "if", "is",
 }
 
 _WHITESPACE_RE = re.compile(r"\s+")

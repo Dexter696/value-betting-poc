@@ -57,7 +57,7 @@ COUNTRY_TO_ESPN_CODE: dict[str, str] = {
     "peru": "per", "paraguay": "par", "venezuela": "ven", "costa rica": "crc",
     "honduras": "hon", "guatemala": "gua", "el salvador": "slv",
     "japan": "jpn", "saudi arabia": "ksa", "india": "ind", "south africa": "rsa",
-    "russia": "rus", "australia": "aus",
+    "russia": "rus", "australia": "aus", "switzerland": "sui",
 }
 
 # Countries Pinnacle offers markets for that ESPN has no soccer league
@@ -105,18 +105,30 @@ INTERNATIONAL_SLUGS: dict[str, str] = {
 # misread as a tier-1 league.
 _TOP_FLIGHT_NAMES = {
     "premier league", "division 1", "liga mx", "brasileirao", "serie a",
-    "primera division", "liga profesional", "eredivisie", "ligue 1",
+    "primera division", "liga profesional", "liga pro", "eredivisie", "ligue 1",
     "bundesliga", "super lig", "allsvenskan", "eliteserien", "superliga",
-    "liga i", "premiership", "liga auf uruguaya",
+    "liga i", "premiership", "liga auf uruguaya", "super league",
 }
 _SECOND_TIER_NAMES = {
     "championship", "division 2", "serie b", "ligue 2", "2. bundesliga",
-    "segunda division", "primera b",
+    "segunda division", "primera b", "challenge league",
 }
 
 
 def _espn_slug_for(competition: str) -> Optional[str]:
     text = competition.strip().lower()
+
+    # "Club Friendlies" (pre-season club fixtures) is NOT the same thing as
+    # the "friendlies"/"friendlies women" entries below, which are full
+    # INTERNATIONAL (nation vs nation) friendlies under fifa.friendly -
+    # confirmed live that slug carries zero club fixtures. ESPN doesn't
+    # expose pre-season club friendlies under one enumerable slug at all
+    # (each is its own small one-off tournament), so this is a real,
+    # permanent gap - excluded explicitly here so it reads as "checked,
+    # can't place it" rather than silently matching the wrong slug and
+    # failing every single cycle forever.
+    if text.startswith("club friendlies"):
+        return None
 
     for name, slug in INTERNATIONAL_SLUGS.items():
         if name in text:
