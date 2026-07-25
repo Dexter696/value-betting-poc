@@ -300,6 +300,7 @@
       <thead>
         <tr>
           <th data-sort="match">Match</th>
+          <th class="num" data-sort="betOdds" title="The comparison site's odds at entry - what we'd actually bet at, not Pinnacle's reference price">Odds</th>
           <th data-sort="bucket">Bucket</th>
           <th class="num" data-sort="entryEdgeA" title="Recalculated at the current threshold">Entry A</th>
           <th class="num" data-sort="peakEdgeA">Peak</th>
@@ -743,6 +744,7 @@ function buildDetailRow(opp) {
 function sortValue(opp, key) {
   switch (key) {
     case 'match': return `${opp.home} ${opp.away}`;
+    case 'betOdds': return getEntry(opp).comparisonOdds;
     case 'bucket': return getEntry(opp).bucket;
     case 'entryEdgeA': return getEntry(opp).edgeA;
     case 'peakEdgeA': return opp.peakEdgeA; // the trajectory-wide max - doesn't depend on where entry is defined
@@ -763,7 +765,7 @@ function renderTable(items) {
   document.getElementById('count').textContent = `${sorted.length} of ${DATA.opportunities.length}`;
 
   if (!sorted.length) {
-    document.getElementById('tbody').innerHTML = `<tr><td colspan="8" class="empty">No opportunities match this filter.</td></tr>`;
+    document.getElementById('tbody').innerHTML = `<tr><td colspan="9" class="empty">No opportunities match this filter.</td></tr>`;
     return;
   }
 
@@ -778,6 +780,7 @@ function renderTable(items) {
     return `
       <tr class="row-main" data-idx="${i}">
         <td class="match-cell"><div class="home-away">${opp.home} vs ${opp.away}</div><div class="meta">${legDesc}</div></td>
+        <td class="num">${entry.comparisonOdds.toFixed(2)}</td>
         <td><span class="bucket-badge">${entry.bucket}</span></td>
         <td class="num ${edgeClass(entry.edgeA)}">${pct(entry.edgeA)}</td>
         <td class="num ${edgeClass(opp.peakEdgeA)}">${pct(opp.peakEdgeA)}</td>
@@ -786,7 +789,7 @@ function renderTable(items) {
         <td><span class="status-badge status-${status.key}">${status.label}</span></td>
         <td class="num ${pnlCls}">${pnlStr}</td>
       </tr>
-      <tr class="row-detail" id="detail-${i}" hidden><td colspan="8"></td></tr>
+      <tr class="row-detail" id="detail-${i}" hidden><td colspan="9"></td></tr>
     `;
   }).join('');
   document.getElementById('tbody').innerHTML = rows;
