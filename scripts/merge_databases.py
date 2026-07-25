@@ -79,6 +79,52 @@ from pathlib import Path
 _RESOLUTION_RANK = {"event_started": 3, "market_suspended": 2, "dropped_below_threshold": 1, None: 0}
 
 
+def reconcile_snapshot_duplicates(conn) -> dict:
+    """Collapse opportunity_snapshot rows down to at most one per
+    (opportunity_instance_id, captured_at). Found 2026-07-25 alongside
+    the opportunity-level duplication bug above, in the SAME instance -
+    a real, live pattern (32 groups / 42 excess rows in the production
+    database at the time this was written), but its exact origin is NOT
+    fully pinned down: vb/opportunity.py's ingest() timestamp-dedup guard
+    (vb/opportunity.py:209-227) has been unchanged since the initial
+    commit, ruling out "an older, buggier guard" as the cause. Most
+    likely explanation is a residual of merge_databases.py's pre-6318535
+    behavior (before that commit, EVERY source opportunity row was
+    unconditionally inserted - see that commit's diff - which could
+    plausibly have copied overlapping snapshot data across a rename).
+    Root cause aside, keeping duplicate captured_at rows serves no
+    purpose (the extra copies are near-identical - same edge_a/odds,
+    only edge_b drifts by float noise - not meaningfully different
+    readings), so this is fixed the same way as the opportunity-level
+    case: run unconditionally as a final invariant, keep the
+    lowest-id (earliest-inserted) row per group, drop the rest.
+    """
+    dup_groups = conn.execute(
+        """
+        SELECT opportunity_instance_id, captured_at, COUNT(*) as n
+        FROM opportunity_snapshot
+        GROUP BY opportunity_instance_id, captured_at
+        HAVING n > 1
+        """
+    ).fetchall()
+
+    removed = 0
+    for instance_id, captured_at, _n in dup_groups:
+        ids = [
+            row[0]
+            for row in conn.execute(
+                "SELECT id FROM opportunity_snapshot WHERE opportunity_instance_id = ? AND captured_at = ? ORDER BY id",
+                (instance_id, captured_at),
+            )
+        ]
+        for extra_id in ids[1:]:
+            conn.execute("DELETE FROM opportunity_snapshot WHERE id = ?", (extra_id,))
+            removed += 1
+
+    conn.commit()
+    return {"duplicate_snapshot_groups_collapsed": len(dup_groups), "duplicate_snapshots_removed": removed}
+
+
 def reconcile_opportunity_groups(conn) -> dict:
     """Collapse opportunity rows down to at most one per (market_key,
     first_cross_at) - see the module docstring's 2026-07-25 bug note for
@@ -301,8 +347,11 @@ def merge(source_path: str, dest_path: str) -> dict:
     # Safety net (see the 2026-07-25 bug note above): run unconditionally,
     # not just when this merge's own collision logic renamed something -
     # a duplicate group could already exist in dest from a prior run, or
-    # from any other source entirely.
+    # from any other source entirely. Snapshot-level cleanup runs second,
+    # after opportunity-level collapsing has settled which instance ids
+    # actually survive.
     counts.update(reconcile_opportunity_groups(dest))
+    counts.update(reconcile_snapshot_duplicates(dest))
 
     dest.close()
     return counts
