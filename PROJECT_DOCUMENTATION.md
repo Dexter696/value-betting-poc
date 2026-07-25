@@ -1,6 +1,6 @@
 # VB (Value Betting) — Project Documentation
 
-**Purpose of this document:** a complete, verifiable account of what this system does, how it does it, and why every non-obvious design decision was made — written for audit by another LLM or a human reviewer who has no prior context. Every claim below is grounded in a specific file/line in the codebase as of commit `d736e43` (2026-07-24), so it can be independently re-verified rather than taken on faith. Where something is a known limitation or an open question, it is stated as such rather than glossed over.
+**Purpose of this document:** a complete, verifiable account of what this system does, how it does it, and why every non-obvious design decision was made — written for audit by another LLM or a human reviewer who has no prior context. Every claim below is grounded in a specific file/line in the codebase as of commit `a9fe263` (2026-07-25), so it can be independently re-verified rather than taken on faith. Where something is a known limitation or an open question, it is stated as such rather than glossed over. This document has been kept current across two work sessions (2026-07-24 and 2026-07-25); §14 and §15 in particular carry a full, dated history of every real bug found and fixed, including one found by a formal self-audit of this document's own author's work (§14.6).
 
 ---
 
@@ -300,13 +300,25 @@ Mechanically (`scripts/dashboard_template.html:340-390`): the stored `entryEdgeA
 
 The "Entry B (3%)" column was **removed** after this feature shipped: once Entry A could move independently via the slider while Entry B stayed pinned at 3%, showing them side-by-side in the same row stopped being a fair, like-for-like comparison — explicit user call ("we agreed to remove it right for now?").
 
-### 12.3 P&L simulator
+### 12.3 The converge-time filter (`ce7651b`, fixed `1e25ce5`)
+
+A second slider, same UI pattern and same *reach* as the entry threshold (recalculates tiles, table, and simulator, not just the table) — but filtering on `convergence_time` (§6.3) instead of edge magnitude: "only count opportunities whose observed above-threshold window lasted at least N minutes." Explicit user request, with an explicit starting value ("starting with 5m higher, so I can say filter whatever is below 20m of converge").
+
+Mechanically (`scripts/dashboard_template.html`, `qualifiesAtConvergence()`): still-open opportunities have `convergenceSeconds === null` (their eventual duration isn't known yet) and never pass a nonzero filter, mirroring how `qualifiesAtThreshold()` already treats "never reached" opportunities — same "can't include what we don't know yet" logic applied to a different field. Applies to **both** Method A and Method B tiles (unlike the entry threshold, which is Method-A-only) — deliberately, since converge time isn't a method-specific quantity, it's the same real observed window for both methods on a given opportunity.
+
+**Slider range is 0–180 (step 5), default 5** — the 0 ("off") position is load-bearing, not decorative: it's the *only* way to see still-open opportunities or fast-converging settled bets at all, since every position above 0 excludes them by construction. This was originally shipped with `min="5"` (no reachable 0), a real regression caught by the self-audit in §14.6 — dragging to 0 now exactly reproduces the pre-filter tile values (verified in-browser: 169/112/57 bets-identified/awaiting/settled, 95 resolved, matching the numbers from before this feature existed).
+
+### 12.4 The match-table Odds column (`a9fe263`)
+
+A dedicated "Odds" column between "Match" and "Bucket" in the opportunity table, showing `entry.comparisonOdds` — the **comparison site's** price at entry, i.e. what would actually have been bet, as distinct from Pinnacle's reference price (which set the *edge*, not the *stake payout*). Previously this was only visible by expanding a row's detail panel; explicit user request to surface it directly in the table. Sortable like every other column (`sortValue()`'s `'betOdds'` case).
+
+### 12.5 P&L simulator
 
 Flat-vs-fractional-Kelly staking math is **ported 1:1** from `vb/evaluation.py` into JavaScript (`scripts/dashboard_template.html:317-338`) — not reimplemented independently — specifically so the two are guaranteed to agree rather than risk silent drift between a Python "source of truth" and a JS "display copy." A visible formula note (`#kellyFormula`) was added after a user misconception was clarified during development: **Kelly fraction = 1.0 is *not* equivalent to flat staking** — full Kelly still varies stake per bet based on that bet's own edge and odds, unlike flat staking's fixed size; only lower fractions scale every bet's stake down *proportionally*, they don't collapse to a fixed amount.
 
-### 12.4 Tile groups
+### 12.6 Tile groups
 
-Three groups, restructured mid-session for clarity: **Data Collection** (raw capture volume, independent of any threshold), **Betting Activity** (bets identified / awaiting result / settled, all *at the current threshold* — a secondary, visually muted tile shows raw "resolved" count for context, since resolved-vs-settled is a real distinction per §6.2 that's easy to conflate), and **Performance** (Method A at the current threshold vs. Method B fixed at 3%, side by side).
+Three groups, restructured mid-session for clarity: **Data Collection** (raw capture volume, independent of any threshold), **Betting Activity** (bets identified / awaiting result / settled, all *at the current entry threshold AND converge-time filter* — §12.3 — a secondary, visually muted tile shows raw "resolved" count for context, since resolved-vs-settled is a real distinction per §6.2 that's easy to conflate; at the converge filter's 0/"off" position this tile is a meaningfully smaller subset of "bets identified," at any nonzero position it becomes identical to it since a nonzero converge filter already excludes every still-open opportunity — expected, not a bug, see §14.6), and **Performance** (Method A at the current threshold vs. Method B fixed at 3%, side by side — both also respect the converge-time filter).
 
 ---
 
@@ -369,6 +381,23 @@ Included for completeness — the pattern in this project has been to verify eve
 
 - **"Duplicate bets"** (Hapoel Tel Aviv vs Ludogorets Razgrad, Paksi vs Panathinaikos, and others): investigated by pulling the actual live GitHub-hosted database (via `db_sync=export`, not local data or assumption) and tracing exact instance-level detail. Confirmed these are **legitimate separate opportunities** — different selections and/or different comparison sites tracked independently for the same match, not duplication.
 
+### 14.6 Formal self-audit of this session's own work (`1e25ce5`, 2026-07-25)
+
+Distinct from every other entry in this section: not a user-reported anomaly, but a proactively-run, structured code review (high-effort: 8 independent finder angles — 3 correctness, 3 cleanup, altitude, CLAUDE.md conventions — each surfacing up to 6 candidates, followed by an independent one-vote verifier per surviving candidate) against the full cumulative diff of this session's own work (`d736e43..HEAD` at the time, ~930 lines across 10 files: `merge_databases.py`, `reconcile_opportunities.py`, `scheduled_run.py`, `vb/normalize.py`, `vb/sources/results.py`, `vb/storage.py`, plus tests and docs). Run specifically because the user asked to "learn another skill to audit yourself properly."
+
+**Process integrity note**: this section documents the audit's own findings, including bugs in features shipped *earlier in the same session* (the converge-time filter, §12.3) — the point of running a self-audit is precisely to catch this category of thing rather than only ever checking work retroactively when a user notices something.
+
+Of ~9 candidate findings that survived the 8 finder angles, verification (Phase 2, one independent agent per candidate) split them as follows:
+
+**Confirmed and fixed:**
+1. **Converge-time filter had no reachable "off" position** (§12.3) — slider minimum was 5, not 0, so the filter silently excluded every still-open opportunity from the *entire* dashboard by default with no way to see the unfiltered picture, and made the "resolved" tile mathematically identical to "bets identified" (§12.6) while "awaiting result" silently stopped counting live/in-flight bets. Fixed: slider now reaches 0 ("off"); verified in-browser to exactly restore pre-feature tile values.
+2. **`merge_databases.py`'s docstring was factually false** — it claimed "never deletes or overwrites existing row's data," directly contradicted by the `reconcile_opportunity_groups()`/`reconcile_snapshot_duplicates()` passes added earlier the same day (§14.3, §15.1), which do delete rows, including pre-existing duplicate groups in the destination DB unrelated to the current merge call. A future reader trusting the stale claim could call `merge()` speculatively without a backup. Docstring corrected to state the real, narrower guarantee precisely.
+3. **`force_resolve_stale_opportunities` (§15.2) can leave a stale trajectory** on a force-resolved opportunity — confirmed via direct code trace (not just plausible): a normal close always appends a final snapshot at the exact closing moment, but force-resolve deliberately never touches `opportunity_snapshot` (to avoid fabricating an odds reading that was never observed), so `peak_edge_a`/`convergence_time` can silently reflect a reading that's stale by however long the opportunity sat undetected. Accepted as the correct tradeoff versus fabricating data (documented precisely in §15.2 rather than silently assumed away).
+
+**Plausible, not fixed as code (documented instead)**: `reconcile_opportunity_groups()`'s survivor-selection ranks resolution status above snapshot completeness, so a duplicate group's final `resolved_at`/`resolution_reason` can come from a sparser, weakly-resolved entry even though the richer trajectory survives via snapshot union (no data lost, but the metadata label can be wrong) — left as-is since resolving it correctly requires knowing which of two divergent capture streams is more "caught up," which isn't decidable from the data alone. Also: the 2026-07-25 addition of "if"/"is" to the shared team-name stopword list (§14.4) feeds pre-bet cross-site matching (`vb.matching`) in addition to its intended ESPN-settlement target, with no concrete colliding team pair found or ruled out — closed the *test coverage* gap (`vb/tests/test_normalize.py`, two new tests) without reverting or complicating the underlying fix, since the motivating miss was real and the fix correctly closed it.
+
+**Investigated and refuted, with reasoning** (i.e. the audit process working as intended — not everything a finder angle surfaces is real): a proposed race between `force_resolve_stale_opportunities` and a concurrent `save_opportunity()` call was refuted by tracing the actual deployment model (single-threaded `scheduled_run.py`, `concurrency: group: vb-capture` locking GitHub Actions to one run at a time, no shared live connection between local and cloud databases — the race has no reachable trigger); a proposed snapshot-dedup tiebreak edge case was refuted by finding the exact guard in `reconcile_opportunity_groups()` that already prevents the precondition from ever occurring; an N+1 query pattern in `force_resolve_stale_opportunities` was real but refuted on severity (sub-millisecond indexed point-reads, dwarfed by the minutes-long browser-scraping cost of the same cycle); and a concern about the "Club Friendlies" ESPN-exclusion string match was refuted directly against live data (`SELECT DISTINCT competition ... LIKE '%riendl%'` confirmed the real Pinnacle string is exactly `'Club Friendlies'`/`'Club Friendlies Women'` with no prefix, matching the code's assumption).
+
 ---
 
 ## 15. Known limitations and open items (as of this document's writing)
@@ -397,9 +426,9 @@ Seven countries Swisslos covers have confirmed zero ESPN league coverage (Poland
 
 Documented in §3.1 as a confirmed, understood quirk of Pinnacle's own data, not a bug in this system — flagged here again because it does mean `raw_event`/`raw_market_snapshot` row counts for a single real match can legitimately be higher than 1:1, which could read as "duplication" to someone unfamiliar with this quirk.
 
-### 15.5 Method B is not yet threshold-adjustable in the dashboard
+### 15.5 Method B is not yet entry-threshold-adjustable in the dashboard
 
-Explicitly deferred (not cancelled) during the threshold-slider feature build — Method B's dashboard figures remain fixed at the original 3% capture threshold; only Method A responds to the slider (§12.2).
+Explicitly deferred (not cancelled) during the threshold-slider feature build — Method B's dashboard figures remain fixed at the original 3% *entry-edge* capture threshold; only Method A responds to the entry-threshold slider (§12.2). This is unrelated to the separate converge-time filter (§12.3), which **does** apply to both methods since converge time isn't method-specific.
 
 ### 15.6 Infrastructure is POC-grade
 
@@ -409,7 +438,7 @@ Runs entirely on GitHub-hosted Actions runners rather than a persistent VPS — 
 
 ## 16. Testing
 
-144 tests across 16 files (`vb/tests/test_*.py`) as of `f05211a`, covering: edge calculation, evaluation/staking math, Loro/Swisslos/Pinnacle scraper parsing, cross-site matching (including the swap-suspicion and time-cutoff cases), name normalization, the opportunity lifecycle state machine, the full pipeline (`run_cycle`), raw-snapshot pruning, raw-capture storage (including the force-resolve-stale-opportunities safety net), reporting/pre-entry history reconstruction, ESPN result-matching, the human review queue, settlement math (including quarter-line handicap splitting), and settlement storage (including the NULL-line dedup behavior). Run via `pytest` from the project root.
+146 tests across 16 files (`vb/tests/test_*.py`) as of `a9fe263`, covering: edge calculation, evaluation/staking math, Loro/Swisslos/Pinnacle scraper parsing, cross-site matching (including the swap-suspicion and time-cutoff cases), name normalization (including the two Nordic-club-suffix regression tests added by the self-audit, §14.6), the opportunity lifecycle state machine, the full pipeline (`run_cycle`), raw-snapshot pruning, raw-capture storage (including the force-resolve-stale-opportunities safety net), reporting/pre-entry history reconstruction, ESPN result-matching, the human review queue, settlement math (including quarter-line handicap splitting), and settlement storage (including the NULL-line dedup behavior). Run via `pytest` from the project root.
 
 ---
 
@@ -433,7 +462,7 @@ vb/
     swisslos.py       Comparison scraper #1 (Playwright)
     loro.py            Comparison scraper #2 (Playwright)
     results.py         ESPN auto-settlement
-  tests/             144 tests, one file per module above
+  tests/             146 tests, one file per module above
 
 scripts/
   scheduled_run.py         Full capture+pipeline+force-resolve+settle+prune cycle (the scheduled entry point)
