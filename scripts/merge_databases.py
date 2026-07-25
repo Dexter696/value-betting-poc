@@ -34,12 +34,129 @@ instance_id than the original source row, so a second pass won't
 recognize it as already-merged and will renumber-and-insert again.
 Prefer running it once per source snapshot.
 
+BUG FOUND 2026-07-25 (via a real duplicate report, ~41 duplicate rows /
+35 groups in live data - the fix above wasn't enough): the collision
+check above compares the full core-field tuple, which includes
+`resolved_at`/`resolution_reason` - but those fields legitimately
+change over an opportunity's own lifetime (null while open, then set
+once it closes). Two capture streams that each independently tracked
+the SAME real opportunity, one observing it before it closed and one
+after (or via a different resolution_reason, e.g. one stream's cadence
+caught `event_started` first while the other's caught
+`dropped_below_threshold` a cycle earlier), produce two rows with
+DIFFERING core tuples despite being the same real continuous
+above-threshold period - so the old logic renamed-and-reinserted them
+as if genuinely new, multiplying one real bet into two-plus rows in
+every downstream report and dashboard tile.
+
+The actual stable cross-database identity for an opportunity is
+`(market_key, first_cross_at)`, not `instance_id` - `first_cross_at` is
+set exactly once, at creation, and never changes, so two rows sharing
+it are PROVABLY the same real period no matter what their
+`resolved_at`/`resolution_reason`/instance_id happen to be.
+`reconcile_opportunity_groups()` below enforces "at most one row per
+(market_key, first_cross_at)" as a final invariant, unconditionally, at
+the end of every merge - collapsing any group down to one surviving
+instance (keeping the most objectively-complete state: an
+`event_started` resolution beats any other, since kickoff time is a
+deterministic wall-clock fact rather than something that depends on
+which reading a given stream happened to sample; otherwise more
+snapshots/most information wins) and unioning every group member's
+snapshots into the survivor (deduped by captured_at) so no captured
+data is lost in the collapse, only the artificial extra instance_id.
+This runs as a safety net regardless of how a duplicate group
+originated, so it's also the right tool to clean up already-corrupted
+data directly (see scripts/reconcile_opportunities.py).
+
 Usage: python scripts/merge_databases.py <source_db> <dest_db>
 Merges source_db's rows INTO dest_db in place.
 """
 
 import sys
+from collections import defaultdict
 from pathlib import Path
+
+_RESOLUTION_RANK = {"event_started": 3, "market_suspended": 2, "dropped_below_threshold": 1, None: 0}
+
+
+def reconcile_opportunity_groups(conn) -> dict:
+    """Collapse opportunity rows down to at most one per (market_key,
+    first_cross_at) - see the module docstring's 2026-07-25 bug note for
+    why that pair, not instance_id, is the real identity. Idempotent and
+    safe to run on any database regardless of how a duplicate group
+    originated (a bad merge, manual data entry, anything) - a database
+    with no duplicate groups is left untouched.
+    """
+    rows = conn.execute(
+        "SELECT instance_id, market_key, first_cross_at, resolved_at, resolution_reason FROM opportunity"
+    ).fetchall()
+
+    groups: dict[tuple, list[tuple]] = defaultdict(list)
+    for instance_id, market_key, first_cross_at, resolved_at, resolution_reason in rows:
+        groups[(market_key, first_cross_at)].append((instance_id, resolved_at, resolution_reason))
+
+    def snapshot_count(instance_id: str) -> int:
+        return conn.execute(
+            "SELECT COUNT(*) FROM opportunity_snapshot WHERE opportunity_instance_id = ?", (instance_id,)
+        ).fetchone()[0]
+
+    groups_merged = instances_deleted = snapshots_moved = 0
+
+    for (market_key, first_cross_at), entries in groups.items():
+        if len(entries) <= 1:
+            continue
+
+        # Rank by: an event_started resolution (an objective wall-clock
+        # fact, not sampling-dependent) beats any other reason; then more
+        # snapshots (more complete observation); then lexicographically
+        # smallest instance_id as a final deterministic tiebreak.
+        ranked = sorted(
+            entries,
+            key=lambda e: (-_RESOLUTION_RANK[e[2]], -snapshot_count(e[0]), e[0]),
+        )
+        survivor_id = ranked[0][0]
+        losers = ranked[1:]
+
+        existing_captured = {
+            row[0]
+            for row in conn.execute(
+                "SELECT captured_at FROM opportunity_snapshot WHERE opportunity_instance_id = ?", (survivor_id,)
+            )
+        }
+        for loser_id, _loser_resolved_at, _loser_reason in losers:
+            for srow in conn.execute(
+                """
+                SELECT captured_at, edge_a, edge_b, benchmark_odds, comparison_odds,
+                       movement_source, max_bet_size, full_market_json
+                FROM opportunity_snapshot WHERE opportunity_instance_id = ?
+                """,
+                (loser_id,),
+            ).fetchall():
+                if srow[0] in existing_captured:
+                    continue  # same real reading, already present via the survivor or an earlier loser
+                conn.execute(
+                    """
+                    INSERT INTO opportunity_snapshot
+                        (opportunity_instance_id, captured_at, edge_a, edge_b, benchmark_odds,
+                         comparison_odds, movement_source, max_bet_size, full_market_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (survivor_id, *srow),
+                )
+                existing_captured.add(srow[0])
+                snapshots_moved += 1
+            conn.execute("DELETE FROM opportunity_snapshot WHERE opportunity_instance_id = ?", (loser_id,))
+            conn.execute("DELETE FROM opportunity WHERE instance_id = ?", (loser_id,))
+            instances_deleted += 1
+
+        groups_merged += 1
+
+    conn.commit()
+    return {
+        "duplicate_groups_merged": groups_merged,
+        "duplicate_instances_removed": instances_deleted,
+        "snapshots_recovered_from_removed_instances": snapshots_moved,
+    }
 
 
 def merge(source_path: str, dest_path: str) -> dict:
@@ -180,6 +297,13 @@ def merge(source_path: str, dest_path: str) -> dict:
 
     dest.commit()
     dest.execute("DETACH DATABASE src")
+
+    # Safety net (see the 2026-07-25 bug note above): run unconditionally,
+    # not just when this merge's own collision logic renamed something -
+    # a duplicate group could already exist in dest from a prior run, or
+    # from any other source entirely.
+    counts.update(reconcile_opportunity_groups(dest))
+
     dest.close()
     return counts
 
