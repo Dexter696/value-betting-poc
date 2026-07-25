@@ -453,6 +453,64 @@ def list_unsettled_matches(conn: sqlite3.Connection, benchmark_site: str, kickof
     return results
 
 
+def force_resolve_stale_opportunities(conn: sqlite3.Connection, kickoff_buffer_hours: float = 4.0) -> int:
+    """Force-close any still-open opportunity whose benchmark event kicked
+    off more than `kickoff_buffer_hours` ago.
+
+    Normally an opportunity closes itself the moment run_cycle() ingests
+    a reading with event_started=True (vb.pipeline, computed from
+    wall-clock time vs. kickoff, independent of whether the source sites
+    sent fresh odds - see LegReading/OpportunityTracker.ingest). That
+    requires find_leg_edges() to still be producing a LegEdge for the
+    market_key on some later cycle, which depends on both sides' events
+    still being found by match_events()/match_markets() - if that ever
+    stops happening for any reason (found live: several opportunities
+    stuck open days past kickoff with no clear single cause), the normal
+    close path never fires and `is_open` stays True forever, with no
+    settlement possible (list_unsettled_matches doesn't care about
+    is_open, but downstream reporting/dashboard treatment of "open" vs.
+    "closed, unsettled" differs).
+
+    This is a periodic safety net, not a replacement for the normal
+    close path - only touches opportunities well past their own kickoff,
+    never anything that might still be a legitimately live tracking
+    window. resolved_at is set to the kickoff time itself (not "now"),
+    since that's the actual moment pre-match value analysis stopped
+    being meaningful for this leg - the same convention run_cycle() uses
+    for a normal EVENT_STARTED close, so a force-resolved opportunity is
+    indistinguishable in the data from one that closed the normal way.
+    Only touches the opportunity header row, never opportunity_snapshot -
+    the trajectory already captured is left exactly as it was.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=kickoff_buffer_hours)
+
+    rows = conn.execute(
+        "SELECT instance_id, market_key, benchmark_site FROM opportunity WHERE resolved_at IS NULL"
+    ).fetchall()
+
+    resolved_count = 0
+    for instance_id, market_key, benchmark_site in rows:
+        event_id = market_key.split(":")[1]
+        row = conn.execute(
+            "SELECT kickoff_utc FROM raw_event WHERE site = ? AND event_id = ?",
+            (benchmark_site, event_id),
+        ).fetchone()
+        if row is None:
+            continue  # shouldn't happen (raw_event rows are never deleted) - defensive only
+        kickoff = datetime.fromisoformat(row[0])
+        if kickoff >= cutoff:
+            continue  # not stale yet - still within a plausible legitimate tracking window
+
+        conn.execute(
+            "UPDATE opportunity SET resolved_at = ?, resolution_reason = ? WHERE instance_id = ?",
+            (_to_iso(kickoff), ResolutionReason.EVENT_STARTED.value, instance_id),
+        )
+        resolved_count += 1
+
+    conn.commit()
+    return resolved_count
+
+
 def record_match_result(
     conn: sqlite3.Connection,
     benchmark_site: str,

@@ -34,7 +34,14 @@ from vb.sources.loro import LoroClient
 from vb.sources.pinnacle import PinnacleClient
 from vb.sources.results import find_result
 from vb.sources.swisslos import SwisslosClient
-from vb.storage import init_db, list_unsettled_matches, prune_raw_snapshots, record_match_result, save_raw_capture
+from vb.storage import (
+    force_resolve_stale_opportunities,
+    init_db,
+    list_unsettled_matches,
+    prune_raw_snapshots,
+    record_match_result,
+    save_raw_capture,
+)
 
 DB_PATH = ROOT / "data" / "vb.sqlite"
 RAW_SNAPSHOT_RETENTION_HOURS = 24
@@ -106,6 +113,17 @@ def capture_loro(conn) -> None:
     log.info("loro: captured %d events, %d snapshots", len(rows), sum(len(r.snapshots) for r in rows))
 
 
+def force_resolve_stale(conn) -> None:
+    # Safety net for opportunities that never got the normal live close
+    # (see vb.storage.force_resolve_stale_opportunities docstring for why
+    # that can happen) - runs every cycle so nothing stays incorrectly
+    # "open" for more than one cycle past the buffer, same spirit as
+    # auto_settle running every cycle rather than as a rare manual step.
+    count = force_resolve_stale_opportunities(conn)
+    if count:
+        log.info("force-resolve: closed %d stale open opportunity instance(s)", count)
+
+
 def auto_settle(conn) -> None:
     # ESPN doesn't cover every league Pinnacle offers (see
     # vb.sources.results docstring) - matches it can't place still show
@@ -169,6 +187,11 @@ def main() -> None:
         run_pipeline(conn)
     except Exception:
         log.error("pipeline run failed:\n%s", traceback.format_exc())
+
+    try:
+        force_resolve_stale(conn)
+    except Exception:
+        log.error("force-resolve failed:\n%s", traceback.format_exc())
 
     try:
         auto_settle(conn)
