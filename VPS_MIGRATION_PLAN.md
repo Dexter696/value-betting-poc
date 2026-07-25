@@ -1,0 +1,46 @@
+# VPS Migration Plan (draft — research only, not executed)
+
+**Status**: research/planning artifact. Nothing in this document has been acted on — no VPS has been provisioned, no DNS or infrastructure changed. This is a proposal for review, per the standing rule that infrastructure migrations get a plan, not unilateral action.
+
+## Why this is worth doing (grounded in what actually happened today)
+
+The current architecture runs capture entirely on GitHub Actions (`.github/workflows/capture.yml`), explicitly chosen in the POC phase so capture keeps running when the local PC is off (see that file's own comment). That's a reasonable POC decision, but it has a structural side effect that caused real, concrete problems this session:
+
+- **The database has no single home.** It lives in GitHub Actions' cache (ephemeral, per-run-id, restored via prefix match) with a manual export/import/merge dance (`scripts/merge_databases.py`, `db_sync` workflow input) as the only way to reconcile it with anything else — including the local PC, which has historically also run `scheduled_run.py` independently via Windows Task Scheduler (per that script's own docstring). **Two independent capture streams writing to two different databases is the direct root cause of both duplication bugs fixed today** (§14.3/§14.4 in `PROJECT_DOCUMENTATION.md`, ~35 opportunity groups and ~32 snapshot groups duplicated). A single persistent database on a single always-on host eliminates the "two divergent streams" problem at the architecture level — no merge tool would even be needed going forward, not just a better-tested one.
+- **65-minute job timeout.** Already the binding constraint on the once-daily Asian Handicap sweep (`13 3 * * *`, tens of minutes, hundreds of one-page-load-per-match visits) — currently fine, but it's a hard ceiling that full breadth + handicap coverage will eventually bump into as Swisslos's own match volume grows, or if handicap coverage is extended to Loro.
+- **Cron scheduling isn't exact.** GitHub's own documentation states scheduled workflows can be delayed, sometimes by several minutes to longer under platform load — acceptable for a 5-minute-cadence value-detection system today, but it means "5 minutes" is really "5 minutes, best-effort," which matters more as the edge-capture window (how long a value bet stays above 3%) gets analyzed more precisely.
+- **Cache growth, not yet urgent but real.** Checked live 2026-07-25: **748.9 MB across 57 active cache entries**, against GitHub's 10 GB per-repo cache limit — plenty of headroom today, but it grows every single cycle (a new cache entry per run) and is LRU-evicted with no audit trail, which is exactly why the separate daily release-asset backup (§11.2 of the audit doc) had to be built as a second, more durable layer in the first place. A VPS with real persistent disk needs neither the cache nor the backup workaround.
+
+None of this is on fire — the current setup works, per the audit doc's own §15.6 ("Infrastructure is POC-grade"). The case for migrating is that the single biggest data-integrity risk in the whole project (the two-independent-databases problem) is an *architecture* problem, not a code-quality problem, and today's fixes address the *symptom* (bad merges) rather than the *cause* (there being two databases to merge at all).
+
+## What a VPS changes concretely
+
+- One process, one SQLite file, on one disk, continuously. No cache, no cache eviction, no export/import/merge cycle, no `db_sync` workflow input, no `merge_databases.py` needed at all going forward (it'd still be useful as a one-time tool to fold the GitHub Actions history into the VPS's starting database during cutover, then retired).
+- Real cron (or a persistent Python loop with `schedule`/`APScheduler`) with no GitHub-imposed job timeout and much tighter timing than "best-effort."
+- The daily release-asset backup pattern is still worth keeping (a VPS's disk is not itself a backup) — just retarget it at the VPS's local file instead of an Actions-cache export.
+
+## What stays the same
+
+- All application code (`vb/`, `scripts/`) is already environment-agnostic — it reads `data/vb.sqlite` via a plain path and has no GitHub Actions-specific logic baked in (the workflow file is pure orchestration around already-portable scripts). This is a deployment change, not a rewrite.
+- The dashboard deployment (GitHub Pages) can stay exactly as-is — `scripts/build_dashboard.py` produces a static file; the VPS can push it to the `gh-pages`-style deploy via the GitHub API/CLI on the same cadence, or the repo can keep a lightweight Actions workflow that *only* does the dashboard build+deploy step (triggered by, say, a repository_dispatch from the VPS after each cycle, or its own independent schedule reading the VPS's published DB) — this needs a concrete decision during design, flagged below rather than assumed.
+
+## Proposed approach
+
+1. **Provider/sizing**: this workload is Playwright (headless Chromium) + SQLite + light Python — not compute-heavy, but Playwright wants real memory (~1-2GB comfortable headroom) and a full browser dependency chain. A small VPS (2 vCPU / 2-4GB RAM, e.g. a $10-20/mo tier from a mainstream provider) should comfortably run 5-minute-cadence capture plus the periodic full-breadth/handicap sweeps. Exact provider is the user's call (cost, region — pick a datacenter with decent latency to Swisslos/Loro/Pinnacle's own infra, likely EU-based given both comparison sites are Swiss).
+2. **Environment parity**: `requirements.txt` + `playwright install --with-deps chromium` — already exactly what the GitHub Actions job does, so the setup script is nearly a direct port of `capture.yml`'s "Install Python dependencies"/"Install Playwright Chromium" steps.
+3. **Scheduling**: replace the three GitHub Actions cron entries with real cron (or systemd timers) calling `scripts/scheduled_run.py` with the same `--full-swisslos`/`--full-handicaps` flags on the same cadence, OR consolidate into one long-running process using a Python scheduler library — either is a reasonable choice, the three-cadence *logic* itself doesn't need to change.
+4. **One-time data cutover**: export the current GitHub Actions cache DB one final time, run it through `scripts/merge_databases.py` against the VPS's fresh DB (or just seed the VPS directly from that export — no divergent history to merge yet on day one), verify via the same duplicate-group checks used today (`scripts/reconcile_opportunities.py` as a health check, expecting 0 on a freshly-seeded single-source DB), then cut capture over.
+5. **Decide dashboard deploy path** (flagged above, not yet decided): keep a minimal GitHub Actions workflow just for build+deploy, or have the VPS push directly via the GitHub API. Recommend keeping a minimal Actions workflow for this specifically, since GitHub Pages deployment via `actions/deploy-pages` is already working well and low-effort to keep — no reason to move it.
+6. **Retire the old workflow's capture jobs** once the VPS has run cleanly for a few days in parallel (both writing to their own DBs, comparing counts, not yet trusting the VPS as sole source of truth) — a real parallel-run verification period, not an instant cutover, given how much today's session was about exactly this kind of divergent-stream risk.
+7. **Keep the durable backup pattern**, retargeted: a daily cron on the VPS itself uploads its local DB to the same `db-sync` GitHub release asset (or a fresh one) — cheap insurance, no reason to drop it just because the disk is now persistent (disks fail too).
+
+## Risks / open questions (for the user to weigh, not decided here)
+
+- **Cost**: real, ongoing (~$10-20/mo) vs. GitHub Actions' current $0 (public repo, free minutes). This is the main tradeoff — pure data-integrity/timing improvement bought with a small recurring cost.
+- **Operational burden**: a VPS needs someone to patch it, monitor disk usage, restart it after a crash — GitHub Actions gives that up for free today. Worth being honest that this trades a "someone else runs it" model for a "you run it" model.
+- **Playwright browser updates**: `playwright install --with-deps chromium` needs periodic re-runs as Chromium/Playwright versions move; GitHub Actions runners handle base-OS patching automatically, a VPS doesn't.
+- **Timing**: doing this NOW (right after two significant data-integrity fixes) versus letting the current fixes run for a week or two to confirm they hold before taking on a bigger infrastructure change. Recommend the latter — validate today's fixes in production first, don't stack an infrastructure migration on top of an unproven fix.
+
+## Recommendation
+
+Not urgent — the current setup is stable and today's fixes address the concrete duplication risk directly. Worth doing eventually specifically because it removes the *two-databases-that-can-diverge* problem at the root rather than continuing to patch its symptoms, but the honest recommendation is: **let the current fixes prove themselves for 1-2 weeks (watch for any new duplicate groups via `scripts/reconcile_opportunities.py` run as a periodic health check) before committing to an infrastructure change**, since a migration itself introduces its own one-time data-cutover risk that's easier to reason about when the source data is already known-clean.
