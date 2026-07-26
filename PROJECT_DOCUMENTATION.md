@@ -16,6 +16,17 @@ Per the audit's own remediation roadmap, **Phase 0 ("freeze the old experiment")
 4. **Going forward, no historical row is retroactively edited under the guise of a "fix."** Corrections are made as new rows/versions, not silent overwrites of old ones — this discipline starts now, ahead of the full append-only schema (Phase 1) the audit recommends.
 5. This whole document, and everything in §1–§18 below, should be read as **describing a legacy development dataset and the codebase that produced it** — accurate as a record of what was built and why, but not as a claim that the resulting numbers demonstrate a working strategy. See §14.6-adjacent material and the audit document itself (`audit 7-26/value-betting-system-audit-2026-07-25.md`) for the complete findings and the proposed v2 architecture.
 
+**Phase 1 ("schema v2 + append-only persistence") is now built and unit-tested**, as of commits `783343e`, `66bc38a`, `8d87b81`:
+
+- `vb/schema.sql` gained 16 new append-only tables (§15.2 of the audit) alongside the untouched v1 schema — verified additive against a copy of the live 157MB production database (all 6 v1 tables byte-identical row-for-row before/after; `scripts/migrate_schema_v2.py` is the standalone, repeatable way to re-verify this).
+- `vb/identity.py` mints UUID identity at true creation time, never a process-local counter — the direct fix for F-02 (a process-restart identity collision was previously destroying real opportunity history; confirmed live in 16/175 opportunities).
+- `vb/episode.py`'s `EpisodeTracker` is the schema-v2 replacement for `vb.opportunity.OpportunityTracker`, built on that UUID identity.
+- `vb/freshness.py`'s `check_freshness()` is F-01's fix — rejects stale or mutually-skewed benchmark/comparison quote pairs before they can open or extend an episode.
+- `vb/storage.py`'s new v2 functions are insert-only except for a small number of explicit, narrow, guarded state-transition `UPDATE`s on the same row (never a delete-and-rewrite) — `prune_raw_snapshots()` was also fixed in place (F-10: it was ranking "latest" by `MAX(id)`, which a merge can violate; now ranks by `captured_at`).
+- `vb/capture_v2.py` + `vb/pipeline.py`'s `run_cycle_v2()` bridge the new schema onto the *existing, unchanged* `vb.matching`/`vb.edge` engines, and fix F-04 (Method B was only ever checked at Method A's entry snapshot, never scanned for its own independent first crossing) by construction: each method's `StrategyDefinition` drives its own fully independent `EpisodeTracker`.
+
+**None of this is wired into the live scheduled capture yet.** `scripts/scheduled_run.py` still runs v1's `run_cycle()` exactly as before — deliberately: the actual cutover to `run_cycle_v2` is deferred to Phase 2 (infrastructure migration), since that's where a real `experiment_id` and burn-in period begin anyway, and flipping the currently-running scheduled job over mid-Phase-1 would risk the one thing that currently works without adding any value (Phase 3's canonical-matching rewrite and Phase 4's fair-probability model still need to land before a v2 signal is trustworthy end-to-end).
+
 ---
 
 ## 1. The hypothesis being tested
