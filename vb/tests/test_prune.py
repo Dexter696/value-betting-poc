@@ -89,3 +89,26 @@ def test_prune_returns_zero_when_nothing_to_delete(tmp_path):
     save_raw_capture(conn, event, [_snapshot(event, NOW)])
 
     assert prune_raw_snapshots(conn, keep_hours=24) == 0
+
+
+def test_prune_ranks_by_captured_at_not_id(tmp_path):
+    # F-10 (2026-07-25 external audit): a merge can insert a historical
+    # row AFTER a genuinely more recent one already present, giving the
+    # older row the HIGHER autoincrement id. Pruning must not assume
+    # higher id == more recent - it must keep whichever row is actually
+    # latest by captured_at, even if that row has the LOWER id.
+    conn = init_db(tmp_path / "vb.sqlite")
+    event = _event()
+
+    genuinely_recent = NOW - timedelta(hours=1)
+    save_raw_capture(conn, event, [_snapshot(event, genuinely_recent, home_odds=2.1)])  # inserted first -> lower id
+
+    historical_but_inserted_later = NOW - timedelta(hours=48)
+    save_raw_capture(conn, event, [_snapshot(event, historical_but_inserted_later, home_odds=2.0)])  # higher id, older time
+
+    deleted = prune_raw_snapshots(conn, keep_hours=24)
+
+    assert deleted == 1
+    remaining = conn.execute("SELECT captured_at FROM raw_market_snapshot").fetchall()
+    assert len(remaining) == 1
+    assert remaining[0][0] == genuinely_recent.isoformat()  # the truly latest row survives despite its lower id

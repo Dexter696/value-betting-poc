@@ -13,12 +13,45 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
+from .identity import canonical_json
 from .matching import EventMatch
-from .models import MarketSnapshot, MarketType, Outcome, RawEvent, Selection
+from .models import (
+    BetDecision,
+    BetDecisionChoice,
+    BetExecution,
+    CanonicalEvent,
+    CaptureRun,
+    EpisodeEndReason,
+    EventMatchV2,
+    EventVersionV2,
+    ExecutionStatus,
+    MarketSnapshot,
+    MarketSnapshotV2,
+    MarketType,
+    MatchOrientation,
+    MatchRole,
+    MatchTierV2,
+    Outcome,
+    RawEvent,
+    RejectReason,
+    RunStatus,
+    Selection,
+    SignalEpisode,
+    SignalObservation,
+    SourceRun,
+    StrategyDefinition,
+)
 from .opportunity import MovementSource, Opportunity, OpportunitySnapshot, ResolutionReason
 from .settlement import SettlementResult, settle
 
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+
+
+# Bumped when vb/schema.sql gains new tables/columns that need a
+# recorded migration event (schema_migration). v1 = the original 5-table
+# schema (undocumented as a version at the time); v2 = the 2026-07-25
+# audit-remediation append-only tables added in Phase 1.
+CURRENT_SCHEMA_VERSION = 2
 
 
 def init_db(path: str | Path) -> sqlite3.Connection:
@@ -26,6 +59,11 @@ def init_db(path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migration (version, applied_at, description) VALUES (?, ?, ?)",
+        (CURRENT_SCHEMA_VERSION, _to_iso(datetime.now(timezone.utc)),
+         "Schema v2: append-only provenance tables (2026-07-25 audit remediation, Phase 1)"),
+    )
     conn.commit()
     return conn
 
@@ -560,22 +598,291 @@ def prune_raw_snapshots(conn: sqlite3.Connection, keep_hours: int = 24) -> int:
     opportunity_snapshot/settlement rows (the actually meaningful data)
     are never touched by this function.
 
-    Uses MAX(id) as a proxy for "latest" rather than MAX(captured_at)
-    directly, for single-column subquery compatibility across SQLite
-    versions — safe given captures are always inserted in real-time
-    order, so id order matches capture order. Returns rows deleted.
+    F-10 fix (2026-07-25 external audit): this used to keep MAX(id) as a
+    proxy for "latest", on the assumption that a higher id always means
+    a later captured_at. That assumption breaks under merge_databases.py
+    (a historical row inserted later can get a higher id than a
+    genuinely more recent row already present) - the audit found 3,292
+    market keys in the live release DB where MAX(id)'s captured_at was
+    actually OLDER than the true MAX(captured_at) for that key, meaning
+    pruning was keeping a stale row and deleting the real latest one.
+    Now ranks explicitly by captured_at (id only as a tiebreaker for two
+    rows sharing a timestamp) via ROW_NUMBER(), so "latest" always means
+    latest by the field that actually defines recency.
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=keep_hours)).isoformat()
     cursor = conn.execute(
         """
         DELETE FROM raw_market_snapshot
         WHERE captured_at < ?
-          AND id NOT IN (
-              SELECT MAX(id) FROM raw_market_snapshot
-              GROUP BY site, event_id, market_type, line
+          AND id IN (
+              SELECT id FROM (
+                  SELECT id, ROW_NUMBER() OVER (
+                      PARTITION BY site, event_id, market_type, line
+                      ORDER BY captured_at DESC, id DESC
+                  ) AS rn
+                  FROM raw_market_snapshot
+              )
+              WHERE rn > 1
           )
         """,
         (cutoff,),
     )
     conn.commit()
     return cursor.rowcount
+
+
+# ============================================================
+# SCHEMA V2 persistence (2026-07-25 external-audit remediation, Phase 1)
+# ============================================================
+# Every function below is INSERT-only (plus a small number of narrow,
+# explicit UPDATEs of specific late-bound columns, documented per
+# function) - never a DELETE, never a blanket rewrite of a row's
+# children. This is the actual fix for F-02/F-09/F-11: v1's
+# save_opportunity() deleted and rewrote ALL of an opportunity's
+# snapshots on every call, which is exactly the mechanism that let a
+# process-restart identity collision silently destroy an earlier
+# opportunity's real trajectory. Nothing here can do that, because
+# nothing here ever deletes.
+
+
+def save_capture_run(conn: sqlite3.Connection, run: CaptureRun) -> None:
+    conn.execute(
+        """
+        INSERT INTO capture_run (id, scheduled_for, started_at, finished_at, git_sha, schema_version, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (run.id, run.scheduled_for, _to_iso(run.started_at),
+         _to_iso(run.finished_at) if run.finished_at else None,
+         run.git_sha, run.schema_version, run.status.value),
+    )
+    conn.commit()
+
+
+def finish_capture_run(conn: sqlite3.Connection, run_id: str, status: RunStatus, finished_at: datetime) -> None:
+    """The one narrow, explicit state transition capture_run allows -
+    setting finished_at/status once, when the run genuinely ends.
+    Never touches any other column."""
+    conn.execute(
+        "UPDATE capture_run SET status = ?, finished_at = ? WHERE id = ?",
+        (status.value, _to_iso(finished_at), run_id),
+    )
+    conn.commit()
+
+
+def save_source_run(conn: sqlite3.Connection, run: SourceRun) -> None:
+    conn.execute(
+        """
+        INSERT INTO source_run (
+            id, capture_run_id, site, mode, started_at, finished_at, status,
+            event_count, snapshot_count, http_error_count, error_code, error_summary
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (run.id, run.capture_run_id, run.site, run.mode, _to_iso(run.started_at),
+         _to_iso(run.finished_at) if run.finished_at else None, run.status.value,
+         run.event_count, run.snapshot_count, run.http_error_count, run.error_code, run.error_summary),
+    )
+    conn.commit()
+
+
+def finish_source_run(
+    conn: sqlite3.Connection, run_id: str, status: RunStatus, finished_at: datetime,
+    event_count: int = 0, snapshot_count: int = 0, error_code: Optional[str] = None, error_summary: Optional[str] = None,
+) -> None:
+    """The one narrow state transition source_run allows. F-16's fix
+    depends on this always being called, including on failure - a
+    source_run with no terminal status is what makes a partial-failure
+    cycle detectable instead of silently looking like it never ran."""
+    conn.execute(
+        """
+        UPDATE source_run SET status = ?, finished_at = ?, event_count = ?, snapshot_count = ?,
+            error_code = ?, error_summary = ? WHERE id = ?
+        """,
+        (status.value, _to_iso(finished_at), event_count, snapshot_count, error_code, error_summary, run_id),
+    )
+    conn.commit()
+
+
+def save_event_version(conn: sqlite3.Connection, ev: EventVersionV2) -> str:
+    conn.execute(
+        """
+        INSERT INTO event_version (id, site, event_id, valid_from, source_run_id, sport, competition, kickoff_utc, home_team, away_team)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (ev.id, ev.site, ev.event_id, _to_iso(ev.valid_from), ev.source_run_id,
+         ev.sport, ev.competition, _to_iso(ev.kickoff_utc), ev.home_team, ev.away_team),
+    )
+    conn.commit()
+    return ev.id
+
+
+def save_canonical_event(conn: sqlite3.Connection, ce: CanonicalEvent) -> str:
+    conn.execute(
+        "INSERT INTO canonical_event (id, sport, created_at) VALUES (?, ?, ?)",
+        (ce.id, ce.sport, _to_iso(ce.created_at)),
+    )
+    conn.commit()
+    return ce.id
+
+
+def save_event_match_v2(conn: sqlite3.Connection, m: EventMatchV2) -> str:
+    conn.execute(
+        """
+        INSERT INTO event_match (
+            id, canonical_event_id, event_version_id, role, orientation, score,
+            score_components_json, model_version, tier, review_status, decided_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (m.id, m.canonical_event_id, m.event_version_id, m.role.value, m.orientation.value, m.score,
+         canonical_json(m.score_components), m.model_version, m.tier.value, m.review_status, _to_iso(m.decided_at)),
+    )
+    conn.commit()
+    return m.id
+
+
+def save_market_snapshot_v2(conn: sqlite3.Connection, s: MarketSnapshotV2) -> str:
+    conn.execute(
+        """
+        INSERT INTO market_snapshot_v2 (
+            id, source_run_id, event_version_id, market_type, line, outcomes_json,
+            max_bet_size, observed_at, received_at, request_started_at, request_finished_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (s.id, s.source_run_id, s.event_version_id, s.market_type.value, s.line,
+         json.dumps([{"selection": o.selection.value, "odds": o.odds} for o in s.outcomes]),
+         s.max_bet_size, _to_iso(s.observed_at) if s.observed_at else None, _to_iso(s.received_at),
+         _to_iso(s.request_started_at) if s.request_started_at else None,
+         _to_iso(s.request_finished_at) if s.request_finished_at else None),
+    )
+    conn.commit()
+    return s.id
+
+
+def get_or_create_strategy_definition(conn: sqlite3.Connection, strategy: StrategyDefinition) -> str:
+    """StrategyDefinition is content-addressed - `strategy.id` should
+    already be a deterministic id/config_hash the caller computed, but
+    this checks by config_hash regardless so an identical config always
+    resolves to the SAME row rather than creating a duplicate. Never
+    updates an existing row - a strategy definition is immutable by
+    construction (F-06)."""
+    existing = conn.execute(
+        "SELECT id FROM strategy_definition WHERE config_hash = ?", (strategy.config_hash,)
+    ).fetchone()
+    if existing is not None:
+        return existing[0]
+    conn.execute(
+        """
+        INSERT INTO strategy_definition (id, signal_model, threshold, max_age_s, max_skew_s, min_lead_time_s, config_json, config_hash, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (strategy.id, strategy.signal_model, strategy.threshold, strategy.max_age_s, strategy.max_skew_s,
+         strategy.min_lead_time_s, canonical_json(strategy.config), strategy.config_hash, _to_iso(strategy.created_at)),
+    )
+    conn.commit()
+    return strategy.id
+
+
+def find_open_signal_episode(conn: sqlite3.Connection, strategy_version: str, market_identity_id: str) -> Optional[SignalEpisode]:
+    """The schema-v2 replacement for v1's load_open_opportunity - but
+    unlike v1, finding NOTHING open here is never ambiguous with "a
+    fresh process forgot": episode identity is a UUID minted once at
+    creation (vb.identity.new_id()), never a process-local counter, so
+    there is nothing for a fresh process to "forget" in the first
+    place. This function exists for convenience (avoid reopening an
+    already-open episode), not as the mechanism that prevents F-02 -
+    the UUID identity itself is what prevents it.
+    """
+    row = conn.execute(
+        "SELECT id, strategy_version, market_identity_id, started_at, ended_at, end_reason "
+        "FROM signal_episode WHERE strategy_version = ? AND market_identity_id = ? AND ended_at IS NULL",
+        (strategy_version, market_identity_id),
+    ).fetchone()
+    if row is None:
+        return None
+    return SignalEpisode(
+        id=row[0], strategy_version=row[1], market_identity_id=row[2],
+        started_at=_from_iso(row[3]), ended_at=_from_iso(row[4]) if row[4] else None,
+        end_reason=EpisodeEndReason(row[5]) if row[5] else None,
+    )
+
+
+def open_signal_episode(conn: sqlite3.Connection, episode: SignalEpisode) -> str:
+    """Insert a brand-new episode. `episode.id` must already be a fresh
+    vb.identity.new_id() - this function does not mint one, to keep
+    "when is an id created" visible at the call site rather than
+    hidden inside storage."""
+    conn.execute(
+        """
+        INSERT INTO signal_episode (id, strategy_version, market_identity_id, started_at, ended_at, end_reason)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (episode.id, episode.strategy_version, episode.market_identity_id, _to_iso(episode.started_at), None, None),
+    )
+    conn.commit()
+    return episode.id
+
+
+def close_signal_episode(conn: sqlite3.Connection, episode_id: str, ended_at: datetime, end_reason: EpisodeEndReason) -> None:
+    """The one narrow state transition signal_episode allows - setting
+    ended_at/end_reason exactly once. Guarded so a second close attempt
+    (e.g. a re-run racing with itself) can never silently overwrite the
+    first close's real timestamp/reason."""
+    cursor = conn.execute(
+        "UPDATE signal_episode SET ended_at = ?, end_reason = ? WHERE id = ? AND ended_at IS NULL",
+        (_to_iso(ended_at), end_reason.value, episode_id),
+    )
+    conn.commit()
+    if cursor.rowcount == 0:
+        raise ValueError(f"signal_episode {episode_id} is already closed or does not exist - refusing to overwrite")
+
+
+def save_signal_observation(conn: sqlite3.Connection, obs: SignalObservation) -> str:
+    """Always insert-only, including for REJECTED observations
+    (eligible=False) - F-01's freshness/skew gate produces an auditable
+    row either way, never a silent no-op."""
+    conn.execute(
+        """
+        INSERT INTO signal_observation (
+            id, episode_id, decision_time, benchmark_snapshot_id, comparison_snapshot_id,
+            edge_model, edge, eligible, reject_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (obs.id, obs.episode_id, _to_iso(obs.decision_time), obs.benchmark_snapshot_id, obs.comparison_snapshot_id,
+         obs.edge_model, obs.edge, 1 if obs.eligible else 0, obs.reject_reason.value if obs.reject_reason else None),
+    )
+    conn.commit()
+    return obs.id
+
+
+def save_bet_decision(conn: sqlite3.Connection, decision: BetDecision) -> str:
+    """UNIQUE(idempotency_key) at the schema level means a second
+    attempt to record the same logical decision raises IntegrityError
+    rather than silently duplicating it - callers should catch that and
+    treat it as "already decided", not retry-insert."""
+    conn.execute(
+        """
+        INSERT INTO bet_decision (id, strategy_version, signal_observation_id, decided_at, decision, reason, intended_odds, intended_stake, idempotency_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (decision.id, decision.strategy_version, decision.signal_observation_id, _to_iso(decision.decided_at),
+         decision.decision.value, decision.reason, decision.intended_odds, decision.intended_stake, decision.idempotency_key),
+    )
+    conn.commit()
+    return decision.id
+
+
+def save_bet_execution(conn: sqlite3.Connection, execution: BetExecution) -> str:
+    conn.execute(
+        """
+        INSERT INTO bet_execution (
+            id, decision_id, requested_at, responded_at, status, requested_odds,
+            accepted_odds, requested_stake, accepted_stake, external_bet_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (execution.id, execution.decision_id, _to_iso(execution.requested_at),
+         _to_iso(execution.responded_at) if execution.responded_at else None, execution.status.value,
+         execution.requested_odds, execution.accepted_odds, execution.requested_stake,
+         execution.accepted_stake, execution.external_bet_id),
+    )
+    conn.commit()
+    return execution.id
