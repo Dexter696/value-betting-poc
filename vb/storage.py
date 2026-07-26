@@ -758,6 +758,92 @@ def save_market_snapshot_v2(conn: sqlite3.Connection, s: MarketSnapshotV2) -> st
     return s.id
 
 
+def get_or_create_event_version(conn: sqlite3.Connection, ev: EventVersionV2) -> str:
+    """Content-addressed like get_or_create_strategy_definition: if the
+    most recent event_version for (site, event_id) already has these
+    exact (sport, competition, kickoff_utc, home_team, away_team)
+    values, reuse its id instead of inserting an identical row every
+    single capture cycle. Only a genuine correction (e.g. a kickoff-time
+    change) creates a new version - that's what F-03 requires: a later
+    correction must never silently rewrite what an earlier decision saw,
+    which is exactly why this is get-or-create rather than update.
+    """
+    row = conn.execute(
+        """
+        SELECT id, sport, competition, kickoff_utc, home_team, away_team FROM event_version
+        WHERE site = ? AND event_id = ? ORDER BY valid_from DESC LIMIT 1
+        """,
+        (ev.site, ev.event_id),
+    ).fetchone()
+    if row is not None:
+        _id, sport, competition, kickoff_utc, home_team, away_team = row
+        if (sport, competition, kickoff_utc, home_team, away_team) == (
+            ev.sport, ev.competition, _to_iso(ev.kickoff_utc), ev.home_team, ev.away_team,
+        ):
+            return _id
+    return save_event_version(conn, ev)
+
+
+def load_latest_market_snapshots_v2(conn: sqlite3.Connection, site: str) -> list[MarketSnapshotV2]:
+    """The most recent MarketSnapshotV2 per (event_id, market_type, line)
+    for `site`, restricted to source_runs that finished SUCCESS - never
+    read a signal off a partial/failed run (F-16). Reads through
+    event_version's `event_id`/`site` rather than joining on
+    event_version.id directly, matching v1's load_latest_market_snapshots
+    identity (an event is identified by site+event_id even across
+    versions).
+    """
+    rows = conn.execute(
+        """
+        SELECT m.id, m.source_run_id, m.event_version_id, m.market_type, m.line, m.outcomes_json,
+               m.max_bet_size, m.observed_at, m.received_at, m.request_started_at, m.request_finished_at,
+               ev.event_id
+        FROM market_snapshot_v2 m
+        JOIN event_version ev ON ev.id = m.event_version_id
+        JOIN source_run sr ON sr.id = m.source_run_id
+        WHERE ev.site = ? AND sr.status = 'success'
+        """,
+        (site,),
+    ).fetchall()
+
+    latest: dict[tuple, tuple] = {}
+    for row in rows:
+        key = (row[11], row[3], row[4])  # event_id, market_type, line
+        if key not in latest or row[8] > latest[key][8]:  # received_at
+            latest[key] = row
+
+    snapshots = []
+    for row in latest.values():
+        (snap_id, source_run_id, event_version_id, market_type, line, outcomes_json,
+         max_bet_size, observed_at, received_at, request_started_at, request_finished_at, _event_id) = row
+        outcomes = tuple(Outcome(Selection(o["selection"]), o["odds"]) for o in json.loads(outcomes_json))
+        snapshots.append(
+            MarketSnapshotV2(
+                id=snap_id, source_run_id=source_run_id, event_version_id=event_version_id,
+                market_type=MarketType(market_type), line=line, outcomes=outcomes,
+                max_bet_size=max_bet_size, observed_at=_from_iso(observed_at) if observed_at else None,
+                received_at=_from_iso(received_at),
+                request_started_at=_from_iso(request_started_at) if request_started_at else None,
+                request_finished_at=_from_iso(request_finished_at) if request_finished_at else None,
+            )
+        )
+    return snapshots
+
+
+def load_event_version(conn: sqlite3.Connection, event_version_id: str) -> EventVersionV2:
+    row = conn.execute(
+        "SELECT id, site, event_id, valid_from, source_run_id, sport, competition, kickoff_utc, home_team, away_team "
+        "FROM event_version WHERE id = ?",
+        (event_version_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"event_version {event_version_id} not found")
+    return EventVersionV2(
+        id=row[0], site=row[1], event_id=row[2], valid_from=_from_iso(row[3]), source_run_id=row[4],
+        sport=row[5], competition=row[6], kickoff_utc=_from_iso(row[7]), home_team=row[8], away_team=row[9],
+    )
+
+
 def get_or_create_strategy_definition(conn: sqlite3.Connection, strategy: StrategyDefinition) -> str:
     """StrategyDefinition is content-addressed - `strategy.id` should
     already be a deterministic id/config_hash the caller computed, but

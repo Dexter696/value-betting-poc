@@ -20,16 +20,21 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 from sqlite3 import Connection
 
 from .edge import devigged_edge, overround, raw_edge
+from .episode import EpisodeIngestResult, EpisodeTracker, LegReadingV2
+from .freshness import FreshnessLimits, check_freshness
 from .matching import MatchTier, match_events, match_markets
-from .models import MarketSnapshot, MarketType, RawEvent, Selection
+from .models import MarketSnapshot, MarketType, RawEvent, RejectReason, Selection, StrategyDefinition
 from .opportunity import LegReading, Opportunity, OpportunityTracker
 from .storage import (
+    get_or_create_strategy_definition,
     load_approved_review_pairs,
+    load_event_version,
     load_latest_market_snapshots,
+    load_latest_market_snapshots_v2,
     load_open_opportunity,
     save_opportunity,
     save_review_candidate,
@@ -266,3 +271,112 @@ def run_cycle(
             touched.append(opportunity)
 
     return touched
+
+
+def _translate_v2_to_v1(conn: Connection, v2_snapshots: list) -> tuple[list[MarketSnapshot], dict[int, str]]:
+    """Convert MarketSnapshotV2 rows (plus their EventVersionV2) back
+    into v1's RawEvent/MarketSnapshot shapes so find_leg_edges can reuse
+    vb.matching/vb.edge completely unchanged — the whole point of
+    building run_cycle_v2 as a bridge on top of the existing matching
+    engine rather than a parallel reimplementation of it.
+
+    Returns the translated snapshots alongside a python id()-keyed map
+    back to each snapshot's real v2 id, since v1's MarketSnapshot has no
+    id field of its own and LegReadingV2 needs the real
+    benchmark_snapshot_id/comparison_snapshot_id for provenance. Relies
+    on vb.matching.match_markets/match_events returning references into
+    the same objects passed in (never reconstructing them), which is
+    what lets this id()-keyed map still resolve after matching.
+    """
+    event_version_cache: dict[str, RawEvent] = {}
+    translated: list[MarketSnapshot] = []
+    v2_id_by_object: dict[int, str] = {}
+    for snap in v2_snapshots:
+        raw_event = event_version_cache.get(snap.event_version_id)
+        if raw_event is None:
+            ev = load_event_version(conn, snap.event_version_id)
+            raw_event = RawEvent(
+                site=ev.site, sport=ev.sport, competition=ev.competition, kickoff_utc=ev.kickoff_utc,
+                raw_home_team=ev.home_team, raw_away_team=ev.away_team, event_id=ev.event_id,
+            )
+            event_version_cache[snap.event_version_id] = raw_event
+        v1_snap = MarketSnapshot(
+            event=raw_event, market_type=snap.market_type, line=snap.line, outcomes=snap.outcomes,
+            captured_at=snap.received_at, max_bet_size=snap.max_bet_size,
+        )
+        translated.append(v1_snap)
+        v2_id_by_object[id(v1_snap)] = snap.id
+    return translated, v2_id_by_object
+
+
+def run_cycle_v2(
+    conn: Connection,
+    benchmark_site: str,
+    comparison_site: str,
+    strategy: StrategyDefinition,
+    limits: FreshnessLimits,
+    edge_selector: Callable[[LegEdge], float],
+    sport: str = "soccer",
+    now: Optional[datetime] = None,
+) -> list[EpisodeIngestResult]:
+    """Schema-v2 pipeline pass — same matching/edge computation as
+    run_cycle(), but reads from market_snapshot_v2 (vb.capture_v2,
+    SUCCESS source_runs only), gates every reading through F-01's
+    check_freshness before it can open or extend an episode, and drives
+    EpisodeTracker (UUID identity — F-02's fix) instead of
+    OpportunityTracker (process-local counter identity).
+
+    `strategy` and `edge_selector` together are F-04's fix: call this
+    once with a Method-A StrategyDefinition and `lambda leg: leg.edge_a`,
+    and again with a Method-B StrategyDefinition and
+    `lambda leg: leg.edge_b` — each call drives its own independent
+    EpisodeTracker keyed by its own strategy_version, so Method B scans
+    for its OWN first crossing rather than inheriting Method A's
+    already-open episode (the exact bug the audit found: Method B was
+    only ever checked at Method A's entry snapshot, never on its own
+    terms).
+
+    Not yet wired into scripts/scheduled_run.py's live scheduled
+    capture — see vb/capture_v2.py's module docstring for why that
+    cutover is deferred to Phase 2's infrastructure migration rather
+    than done in place here.
+    """
+    now = now or datetime.now(timezone.utc)
+    strategy_id = get_or_create_strategy_definition(conn, strategy)
+
+    bench_v1, bench_ids = _translate_v2_to_v1(conn, load_latest_market_snapshots_v2(conn, benchmark_site))
+    comp_v1, comp_ids = _translate_v2_to_v1(conn, load_latest_market_snapshots_v2(conn, comparison_site))
+    snapshot_ids = {**bench_ids, **comp_ids}
+
+    _trusted, needs_review = classify_event_matches(bench_v1, comp_v1)
+    for candidate in needs_review:
+        save_review_candidate(conn, candidate)
+
+    approved_pairs = load_approved_review_pairs(conn, benchmark_site, comparison_site)
+    legs = find_leg_edges(bench_v1, comp_v1, approved_pairs)
+
+    results: list[EpisodeIngestResult] = []
+    for leg in legs:
+        market_identity = market_key(leg.benchmark_event, leg.market_type, leg.line, leg.selection, comparison_site)
+        freshness = check_freshness(
+            benchmark_received_at=leg.benchmark_market.captured_at,
+            comparison_received_at=leg.comparison_market.captured_at,
+            kickoff_utc=leg.benchmark_event.kickoff_utc,
+            now=now,
+            limits=limits,
+        )
+        reading = LegReadingV2(
+            received_at=leg.captured_at,
+            edge=edge_selector(leg),
+            benchmark_snapshot_id=snapshot_ids[id(leg.benchmark_market)],
+            comparison_snapshot_id=snapshot_ids[id(leg.comparison_market)],
+            edge_model=strategy.signal_model,
+            eligible=freshness.eligible,
+            reject_reason=RejectReason(freshness.reject_reason) if freshness.reject_reason else None,
+            market_suspended=False,
+            event_started=now >= leg.benchmark_event.kickoff_utc,
+        )
+        tracker = EpisodeTracker(conn, strategy_id, market_identity, threshold=strategy.threshold)
+        results.append(tracker.ingest(reading))
+
+    return results
