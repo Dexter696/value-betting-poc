@@ -125,12 +125,20 @@ def _parse_kickoff(rel_text: str, now_local: datetime) -> Optional[datetime]:
     return local_dt.astimezone(timezone.utc)
 
 
+_TRAILING_COLUMN_LABELS_RE = re.compile(r"(?<=[^\W\d_])\d.*$", re.DOTALL)
+
+
 def _competition_name(header_text: str) -> str:
     # Header text glues the market-column labels onto the end, e.g.
-    # "Qualifikation, Europa League1  X  2  Over  Tore  Under" - keep only
-    # what comes before the first digit.
-    m = re.match(r"^[^\d]*", header_text)
-    return (m.group(0) if m else header_text).strip()
+    # "Qualifikation, Europa League1  X  2  Over  Tore  Under" - the
+    # glued labels always start with a digit fused directly onto the
+    # last letter of the name (no space). Splitting at the FIRST digit
+    # anywhere (the original approach) silently destroyed any
+    # competition whose real name starts with a digit, e.g. Swiss
+    # league tiers like "2. Bundesliga" or "3. Liga" (audit F-14) - the
+    # leading "2" has nothing before it, so the lookbehind here never
+    # matches there, and only the genuinely glued suffix gets stripped.
+    return _TRAILING_COLUMN_LABELS_RE.sub("", header_text).strip()
 
 
 _ASIAN_HANDICAP_HEADING = "Asiatisches Handicap"

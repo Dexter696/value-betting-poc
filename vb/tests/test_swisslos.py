@@ -94,6 +94,19 @@ def test_competition_name_strips_trailing_count():
     assert _competition_name("Klub-Freundschaftsspiele10") == "Klub-Freundschaftsspiele"
 
 
+def test_competition_name_preserves_a_leading_digit_in_the_name():
+    # Audit F-14: the old "strip from the first digit anywhere" approach
+    # destroyed Swiss league-tier names that themselves start with a
+    # digit, since it treated "2" in "2. Bundesliga" the same as the
+    # digit that kicks off the glued column labels.
+    raw = "2. Bundesliga1  X  2  Over  Tore  Under"
+    assert _competition_name(raw) == "2. Bundesliga"
+
+
+def test_competition_name_preserves_a_leading_digit_with_no_trailing_labels():
+    assert _competition_name("3. Liga") == "3. Liga"
+
+
 def test_parse_row_handles_match_winner_only_row():
     # Reproduces a real gap found live: lower-tier competitions (e.g.
     # DFB-Pokal) only ever show match-winner odds, no totals column - a
