@@ -3,3 +3,4 @@ unidecode
 pytest
 playwright
 requests
+scipy
