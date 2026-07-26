@@ -323,7 +323,7 @@ CREATE TABLE IF NOT EXISTS signal_observation (
     eligible                 INTEGER NOT NULL,
     reject_reason            TEXT,
     CHECK (eligible IN (0, 1)),
-    CHECK (reject_reason IN ('benchmark_stale', 'comparison_stale', 'snapshot_skew', 'source_failed') OR reject_reason IS NULL),
+    CHECK (reject_reason IN ('benchmark_stale', 'comparison_stale', 'snapshot_skew', 'source_failed', 'insufficient_lead_time') OR reject_reason IS NULL),
     UNIQUE (episode_id, benchmark_snapshot_id, comparison_snapshot_id, edge_model)
 );
 CREATE INDEX IF NOT EXISTS idx_signal_observation_episode ON signal_observation(episode_id, decision_time);

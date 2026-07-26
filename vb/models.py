@@ -269,6 +269,7 @@ class RejectReason(str, Enum):
     COMPARISON_STALE = "comparison_stale"
     SNAPSHOT_SKEW = "snapshot_skew"
     SOURCE_FAILED = "source_failed"
+    INSUFFICIENT_LEAD_TIME = "insufficient_lead_time"
 
 
 @dataclass(frozen=True)
