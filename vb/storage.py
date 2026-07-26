@@ -21,6 +21,7 @@ from .models import (
     BetExecution,
     CanonicalEvent,
     CaptureRun,
+    ClosingSnapshot,
     EpisodeEndReason,
     EventMatchV2,
     EventVersionV2,
@@ -972,3 +973,20 @@ def save_bet_execution(conn: sqlite3.Connection, execution: BetExecution) -> str
     )
     conn.commit()
     return execution.id
+
+
+def save_closing_snapshot(conn: sqlite3.Connection, snapshot: ClosingSnapshot) -> str:
+    """Insert-only, like every other v2 table - a market's closing
+    price is captured once, at the moment it stops being tradeable, and
+    never revised afterward."""
+    conn.execute(
+        """
+        INSERT INTO closing_snapshot (id, canonical_event_id, market_type, line, selection, captured_at, consensus_odds, source_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (snapshot.id, snapshot.canonical_event_id, snapshot.market_type.value, snapshot.line,
+         snapshot.selection.value, _to_iso(snapshot.captured_at), snapshot.consensus_odds,
+         canonical_json(snapshot.source_json)),
+    )
+    conn.commit()
+    return snapshot.id

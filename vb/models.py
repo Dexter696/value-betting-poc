@@ -342,3 +342,20 @@ class BetExecution:
     accepted_odds: Optional[float] = None
     accepted_stake: Optional[float] = None
     external_bet_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ClosingSnapshot:
+    """A market's consensus closing price - the reference point CLV
+    (closing-line value, vb.closing) is measured against. Populated by
+    Phase 5's closing-consensus collection (vb/closing.py), independent
+    of whether a bet was ever placed on this leg."""
+
+    id: str
+    canonical_event_id: str
+    market_type: MarketType
+    line: Optional[float]
+    selection: Selection
+    captured_at: datetime
+    consensus_odds: float
+    source_json: dict
