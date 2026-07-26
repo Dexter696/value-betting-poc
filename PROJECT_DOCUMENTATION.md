@@ -4,6 +4,20 @@
 
 ---
 
+## 0. Legacy dataset notice (read this first)
+
+**An independent external audit examined this project on 2026-07-25** (commit `e0a0e12ed0d6c7ff887066a47d0f630e2efff3e1`, database SHA-256 `7fe5770104cbfcf974174210bacc1cd8d8bfc4ceb87afbeb08c8c995e07ad504`) and returned a **NO-GO verdict** for real money and for any public claim of proven positive ROI. The audit found several real correctness bugs beyond what this document's own §14 bug history had caught — most seriously, a confirmed case where an opportunity re-crossing after a process restart could silently overwrite an earlier opportunity's recorded history (found live in 16 of 175 opportunities), a missing freshness/skew gate that lets the pipeline pair arbitrarily stale odds, and a Method B evaluation that checks the wrong entry point (only whether B's edge was already above threshold at Method A's entry snapshot, never scanning for B's own first crossing). The audit's own §6.1 also states plainly: **23 of the 59 settled Method-A legs entered before this project's first commit, and all 59 entered before the major duplicate-fix commits — none of the current ROI figures are attributable to the code as it exists today.**
+
+Per the audit's own remediation roadmap, **Phase 0 ("freeze the old experiment") has been executed**:
+
+1. The exact database the audit examined is archived read-only and immutably at GitHub release [`legacy-development-2026-07`](https://github.com/Dexter696/value-betting-poc/releases/tag/legacy-development-2026-07) — this asset will never be overwritten, unlike the `db-sync` release which the daily capture cycle keeps replacing.
+2. The live dashboard now shows a permanent banner: *"Legacy development data — not attributable to current strategy"*, and the misleading Method-B/converge-filter headline framing has been relabeled to say plainly what those numbers are and are not.
+3. Every dashboard build is now tagged with `experimentId: legacy-development-2026-07` (`scripts/build_dashboard.py`'s `EXPERIMENT_ID` constant), embedded in the data itself, not just prose.
+4. **Going forward, no historical row is retroactively edited under the guise of a "fix."** Corrections are made as new rows/versions, not silent overwrites of old ones — this discipline starts now, ahead of the full append-only schema (Phase 1) the audit recommends.
+5. This whole document, and everything in §1–§18 below, should be read as **describing a legacy development dataset and the codebase that produced it** — accurate as a record of what was built and why, but not as a claim that the resulting numbers demonstrate a working strategy. See §14.6-adjacent material and the audit document itself (`audit 7-26/value-betting-system-audit-2026-07-25.md`) for the complete findings and the proposed v2 architecture.
+
+---
+
 ## 1. The hypothesis being tested
 
 Soft (recreational-market) bookmakers — Swisslos.ch and Loro.ch, both Swiss state-licensed betting operators — occasionally quote odds that diverge from the "true" market price. Pinnacle.com, a sharp/low-margin book widely used in the odds-modeling community as a reference price, is treated as that true-price **benchmark**. When a soft book's price implies a better payout than Pinnacle's own price would justify, that's flagged as a **value bet**.

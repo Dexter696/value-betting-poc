@@ -56,6 +56,16 @@
   .tile.secondary .value { font-size: 14px; color: var(--text-muted); }
   .tile.secondary .label { color: var(--text-muted); }
 
+  /* ---- legacy-dataset notice (2026-07-25 audit, Phase 0) ---- */
+  .legacy-banner {
+    padding: 14px 16px; margin-bottom: 16px;
+    background: color-mix(in srgb, var(--bad, #e34948) 12%, var(--surface-2));
+    border: 1px solid var(--bad, #e34948); border-radius: 8px;
+  }
+  .legacy-banner .headline { font-size: 14px; font-weight: 700; color: var(--text-primary); margin-bottom: 4px; }
+  .legacy-banner .detail { font-size: 12px; color: var(--text-secondary); line-height: 1.5; }
+  .legacy-banner code { font-size: 11px; }
+
   /* ---- global threshold control ---- */
   .threshold-bar {
     display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
@@ -192,6 +202,22 @@
   <h1>Value Betting — analysis dashboard</h1>
   <p class="subtitle" id="subtitle">data/vb.sqlite</p>
 
+  <div class="legacy-banner">
+    <div class="headline">⚠ Legacy development data — not attributable to current strategy</div>
+    <div class="detail">
+      This entire dataset is from before an independent audit (2026-07-25) found several
+      correctness issues in the capture/lifecycle pipeline that produced it — including one
+      confirmed bug where a re-crossing after a process restart could silently overwrite an
+      earlier opportunity's recorded history. None of the ROI numbers below can be attributed
+      to validated, currently-running code; treat every figure on this page as descriptive of
+      a development dataset, not as evidence the strategy is profitable. A permanently frozen,
+      hash-verified copy of exactly what the audit examined is archived at
+      <code>experiment_id: <span id="experimentId">?</span></code>
+      (GitHub release <code>legacy-development-2026-07</code>, commit <code>e0a0e12</code>).
+      A new experiment must start from a clean cutover before any performance claim is made.
+    </div>
+  </div>
+
   <div class="threshold-bar">
     <label for="entryThreshold">Entry threshold</label>
     <input type="range" id="entryThreshold" min="3" max="15" step="0.5" value="3" />
@@ -203,7 +229,7 @@
     <label for="convergenceThreshold">Min. converge time</label>
     <input type="range" id="convergenceThreshold" min="0" max="180" step="5" value="5" />
     <span class="tval" id="convergenceVal">5m</span>
-    <span class="note">Same idea as entry threshold, applied to converge time instead of edge: excludes any opportunity whose observed window (first cross &rarr; close) was shorter than this - including still-open ones, since their eventual converge time isn't known yet. Drag to 0 (left edge) to turn this off and see everything, including still-open bets. Combines with entry threshold (both must pass).</span>
+    <span class="note"><strong>Not an executable entry rule (look-ahead bias):</strong> this filters retrospectively, using each opportunity's FINAL observed duration - a real strategy could never know at entry time whether a signal would still be alive 5 minutes later. Treat this as a descriptive cohort split ("how did signals that happened to last &gt;= N minutes perform"), not a simulation of "wait N minutes then bet." Excludes any opportunity whose observed window (first cross &rarr; close) was shorter than this - including still-open ones, since their eventual converge time isn't known yet. Drag to 0 (left edge) to turn this off and see everything, including still-open bets. Combines with entry threshold (both must pass).</span>
   </div>
 
   <div class="tile-group">
@@ -218,8 +244,9 @@
   </div>
 
   <div class="tile-group">
-    <div class="tile-group-label">Performance</div>
+    <div class="tile-group-label">Performance (exploratory, legacy dataset — see banner above)</div>
     <div class="tiles" id="tilesMethod"></div>
+    <div class="note" style="margin-top:6px">"Method B" below is NOT an independent strategy replay: it only checks whether Method B's own edge was already &gt;= threshold at Method A's entry snapshot, never scanning for Method B's own later crossing. A corrected replay finds materially more/different qualifying legs. Do not read this as Method B's real performance.</div>
   </div>
 
   <div class="section">
@@ -539,10 +566,10 @@ function renderTiles() {
   const bLegs = DATA.opportunities.filter(o => o.outcome && methodBAgrees(o) && qualifiesAtConvergence(o));
   const b = statsFor(bLegs, l => l.entryEdgeB, l => l.entryComparisonOdds);
   document.getElementById('tilesMethod').innerHTML = `
-    <div class="tile"><div class="value">${a.n} / ${a.hitRate !== null ? (a.hitRate*100).toFixed(0)+'%' : 'n/a'}</div><div class="label">Method A (threshold ${(state.threshold*100).toFixed(1)}%): settled bets / hit rate</div></div>
-    <div class="tile"><div class="value ${a.roi >= 0 ? 'edge-pos' : 'edge-neg'}">${pct(a.roi)}</div><div class="label">Method A: flat ROI</div></div>
-    <div class="tile"><div class="value">${b.n} / ${b.hitRate !== null ? (b.hitRate*100).toFixed(0)+'%' : 'n/a'}</div><div class="label">Method B agrees (fixed 3%): settled bets / hit rate</div></div>
-    <div class="tile"><div class="value ${b.roi >= 0 ? 'edge-pos' : 'edge-neg'}">${pct(b.roi)}</div><div class="label">Method B agrees: flat ROI</div></div>
+    <div class="tile"><div class="value">${a.n} / ${a.hitRate !== null ? (a.hitRate*100).toFixed(0)+'%' : 'n/a'}</div><div class="label">Method A (threshold ${(state.threshold*100).toFixed(1)}%): settled bets / hit rate — price-gap-vs-benchmark, not fair EV</div></div>
+    <div class="tile"><div class="value ${a.roi >= 0 ? 'edge-pos' : 'edge-neg'}">${pct(a.roi)}</div><div class="label">Method A: flat ROI (unvalidated, legacy dataset)</div></div>
+    <div class="tile"><div class="value">${b.n} / ${b.hitRate !== null ? (b.hitRate*100).toFixed(0)+'%' : 'n/a'}</div><div class="label">Method B, subset of A's entries only (NOT independent replay) — settled bets / hit rate</div></div>
+    <div class="tile"><div class="value ${b.roi >= 0 ? 'edge-pos' : 'edge-neg'}">${pct(b.roi)}</div><div class="label">Method B subset: flat ROI (NOT a validated standalone result)</div></div>
   `;
 }
 
@@ -881,6 +908,7 @@ document.getElementById('kellyFrac').addEventListener('input', e => {
   render();
 });
 
+document.getElementById('experimentId').textContent = DATA.experimentId || 'unset';
 render();
 document.getElementById('footer').textContent = 'Pre-entry rows are reconstructed from raw capture history, not originally stored (they never crossed 3%). Click any row to expand its full odds history across all 3 books. Entry threshold above recalculates Method A everywhere (tiles, table, simulator) from each opportunity\'s own captured trajectory - Method B stays fixed at the original 3%. P&L simulator recomputes live from the same math as vb/evaluation.py (flat_stake_profit / kelly_stake_fraction).';
 </script>

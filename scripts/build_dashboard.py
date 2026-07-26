@@ -77,6 +77,17 @@ def _snapshot_dict(s, benchmark_site, comparison_site, third_site, third_outcome
     }
 
 
+# Phase 0 of the 2026-07-25 external audit's remediation roadmap: tag
+# every build with an explicit experiment identity so a dataset can never
+# be silently mistaken for a different (e.g. future, validated) one. This
+# whole dataset predates the audit's fixes and is not attributable to
+# currently-running code - see the dashboard's legacy-dataset banner and
+# PROJECT_DOCUMENTATION.md's "Legacy dataset notice" section. This
+# constant must change (to a new, non-"legacy-" id) only once a real
+# Phase 1+ cutover happens - never edited to make old data look current.
+EXPERIMENT_ID = "legacy-development-2026-07"
+
+
 def collect_data(conn) -> dict:
     stats = {
         "matchesCaptured": conn.execute("SELECT COUNT(*) FROM raw_event").fetchone()[0],
@@ -180,7 +191,7 @@ def collect_data(conn) -> dict:
             "snapshots": snapshot_dicts,
         })
 
-    return {"stats": stats, "opportunities": opportunities}
+    return {"experimentId": EXPERIMENT_ID, "stats": stats, "opportunities": opportunities}
 
 
 def main() -> None:
