@@ -26,8 +26,9 @@ from sqlite3 import Connection
 from .edge import devigged_edge, overround, raw_edge
 from .episode import EpisodeIngestResult, EpisodeTracker, LegReadingV2
 from .freshness import FreshnessLimits, check_freshness
+from .market_mapping import match_events_v2, remap_handicap_line, remap_selection
 from .matching import MatchTier, match_events, match_markets
-from .models import MarketSnapshot, MarketType, RawEvent, RejectReason, Selection, StrategyDefinition
+from .models import MarketSnapshot, MarketType, MatchOrientation, Outcome, RawEvent, RejectReason, Selection, StrategyDefinition
 from .opportunity import LegReading, Opportunity, OpportunityTracker
 from .storage import (
     get_or_create_strategy_definition,
@@ -234,6 +235,120 @@ def find_leg_edges(
     return results
 
 
+def classify_event_matches_v2(benchmark_snapshots: list[MarketSnapshot], comparison_snapshots: list[MarketSnapshot]):
+    """v2 replacement for classify_event_matches() — uses
+    vb.market_mapping.match_events_v2 (globally-optimal bipartite
+    assignment within each competition+kickoff-window block, F-14)
+    instead of vb.matching.match_events (greedy, order-dependent).
+    Returns (trusted, needs_review) OrientedEventMatch lists, mirroring
+    classify_event_matches()'s (AUTO, REVIEW) split — REJECT-tier
+    "matches" never make it out of match_events_v2 in the first place.
+    """
+    benchmark_by_event = _group_by_event(benchmark_snapshots)
+    comparison_by_event = _group_by_event(comparison_snapshots)
+    benchmark_events = [snaps[0].event for snaps in benchmark_by_event.values()]
+    comparison_events = [snaps[0].event for snaps in comparison_by_event.values()]
+
+    matches = match_events_v2(benchmark_events, comparison_events)
+    trusted = [m for m in matches if m.tier == MatchTier.AUTO]
+    needs_review = [m for m in matches if m.tier == MatchTier.REVIEW]
+    return trusted, needs_review
+
+
+def _reorient_market(
+    market: MarketSnapshot, orientation: MatchOrientation, snapshot_ids: Optional[dict] = None
+) -> MarketSnapshot:
+    """The other half of F-14's fix: a candidate market detected as
+    SWAPPED orientation has its outcomes' selections, and (for a
+    directional Asian Handicap) its line's sign, remapped into the
+    ANCHOR's frame — so a "HOME" price that's really the anchor's away
+    team, or a line signed from the wrong team's perspective, is never
+    silently compared as if it were the anchor's own HOME/its own
+    line. Returns `market` unchanged when orientation is SAME, so every
+    downstream consumer (edge calculation, LegEdge's own odds-lookup
+    properties, full_market_json) can treat every comparison_market the
+    same way without needing to know orientation ever existed.
+
+    `snapshot_ids` is run_cycle_v2's id()-keyed map from a translated
+    MarketSnapshot back to its real v2 snapshot id
+    (see _translate_v2_to_v1). Reorienting builds a NEW MarketSnapshot
+    object (a frozen dataclass — its outcomes/line can't be mutated in
+    place), which would silently break that id()-keyed lookup for every
+    SWAPPED leg if left unregistered; this carries the original
+    object's v2 id forward onto the new one's id() so it keeps
+    resolving correctly downstream. A no-op when snapshot_ids is None
+    (test callers that don't need v2 id resolution) or when orientation
+    is SAME (nothing new was created to register).
+    """
+    if orientation is MatchOrientation.SAME:
+        return market
+    remapped_outcomes = tuple(Outcome(remap_selection(o.selection, orientation), o.odds) for o in market.outcomes)
+    reoriented = MarketSnapshot(
+        event=market.event, market_type=market.market_type, line=remap_handicap_line(market.line, orientation),
+        outcomes=remapped_outcomes, captured_at=market.captured_at, max_bet_size=market.max_bet_size,
+    )
+    if snapshot_ids is not None and id(market) in snapshot_ids:
+        snapshot_ids[id(reoriented)] = snapshot_ids[id(market)]
+    return reoriented
+
+
+def find_leg_edges_v2(
+    benchmark_snapshots: list[MarketSnapshot],
+    comparison_snapshots: list[MarketSnapshot],
+    approved_pairs: frozenset = frozenset(),
+    snapshot_ids: Optional[dict] = None,
+) -> list[LegEdge]:
+    """v2 replacement for find_leg_edges() — same overall shape and
+    edge-computation logic, but matches events via match_events_v2
+    (bipartite + orientation, F-14) instead of match_events (greedy),
+    and reorients each matched candidate market into the anchor's frame
+    (_reorient_market) BEFORE matching markets by (market_type, line) —
+    a SWAPPED candidate's own raw handicap line is signed from ITS home
+    team's perspective, which only lines up with the anchor's line
+    after remapping. `snapshot_ids`, if given, is threaded through to
+    _reorient_market so run_cycle_v2's id()-keyed v2-snapshot-id lookup
+    keeps working for reoriented markets too.
+    """
+    benchmark_by_event = _group_by_event(benchmark_snapshots)
+    comparison_by_event = _group_by_event(comparison_snapshots)
+
+    trusted, needs_review = classify_event_matches_v2(benchmark_snapshots, comparison_snapshots)
+    approved_review = [
+        m for m in needs_review if (m.anchor.event_id, m.candidate.event_id) in approved_pairs
+    ]
+    event_matches = trusted + approved_review
+
+    results: list[LegEdge] = []
+    for em in event_matches:
+        bm_markets = benchmark_by_event[em.anchor.event_id]
+        cmp_markets = [
+            _reorient_market(m, em.orientation, snapshot_ids) for m in comparison_by_event[em.candidate.event_id]
+        ]
+        market_matches, _unmatched = match_markets(bm_markets, cmp_markets)
+
+        for mm in market_matches:
+            bm_selections = {o.selection for o in mm.anchor.outcomes}
+            for cmp_outcome in mm.candidate.outcomes:
+                if cmp_outcome.selection not in bm_selections:
+                    continue
+                results.append(
+                    LegEdge(
+                        market_key=market_key(
+                            em.anchor, mm.anchor.market_type, mm.anchor.line, cmp_outcome.selection, em.candidate.site
+                        ),
+                        selection=cmp_outcome.selection,
+                        benchmark_market=mm.anchor,
+                        comparison_market=mm.candidate,
+                        edge_a=raw_edge(
+                            next(o.odds for o in mm.anchor.outcomes if o.selection == cmp_outcome.selection),
+                            cmp_outcome.odds,
+                        ),
+                        edge_b=devigged_edge(mm.anchor, cmp_outcome.selection, cmp_outcome.odds),
+                    )
+                )
+    return results
+
+
 def run_cycle(
     conn: Connection, benchmark_site: str, comparison_site: str, sport: str = "soccer", now: Optional[datetime] = None
 ) -> list[Opportunity]:
@@ -353,9 +468,11 @@ def run_cycle_v2(
     sport: str = "soccer",
     now: Optional[datetime] = None,
 ) -> list[EpisodeIngestResult]:
-    """Schema-v2 pipeline pass — same matching/edge computation as
-    run_cycle(), but reads from market_snapshot_v2 (vb.capture_v2,
-    SUCCESS source_runs only), gates every reading through F-01's
+    """Schema-v2 pipeline pass — reads from market_snapshot_v2
+    (vb.capture_v2, SUCCESS source_runs only), matches events via
+    find_leg_edges_v2 (globally-optimal bipartite assignment +
+    orientation remapping — F-14, not the greedy vb.matching.match_events
+    v1's run_cycle() still uses), gates every reading through F-01's
     check_freshness before it can open or extend an episode, and drives
     EpisodeTracker (UUID identity — F-02's fix) instead of
     OpportunityTracker (process-local counter identity).
@@ -370,10 +487,9 @@ def run_cycle_v2(
     only ever checked at Method A's entry snapshot, never on its own
     terms).
 
-    Not yet wired into scripts/scheduled_run.py's live scheduled
-    capture — see vb/capture_v2.py's module docstring for why that
-    cutover is deferred to Phase 2's infrastructure migration rather
-    than done in place here.
+    Wired into scripts/scheduled_run.py's live scheduled capture as a
+    shadow pipeline alongside the completely unchanged run_cycle() —
+    see that script's own module docstring.
     """
     now = now or datetime.now(timezone.utc)
     strategy_id = get_or_create_strategy_definition(conn, strategy)
@@ -382,12 +498,12 @@ def run_cycle_v2(
     comp_v1, comp_ids = _translate_v2_to_v1(conn, load_latest_market_snapshots_v2(conn, comparison_site))
     snapshot_ids = {**bench_ids, **comp_ids}
 
-    _trusted, needs_review = classify_event_matches(bench_v1, comp_v1)
+    _trusted, needs_review = classify_event_matches_v2(bench_v1, comp_v1)
     for candidate in needs_review:
         save_review_candidate(conn, candidate)
 
     approved_pairs = load_approved_review_pairs(conn, benchmark_site, comparison_site)
-    legs = find_leg_edges(bench_v1, comp_v1, approved_pairs)
+    legs = find_leg_edges_v2(bench_v1, comp_v1, approved_pairs, snapshot_ids)
 
     results: list[EpisodeIngestResult] = []
     for leg in legs:
