@@ -5,12 +5,32 @@ matching+edge pipeline for each comparison site vs Pinnacle.
 Logs to data/logs/scheduler.log (and stdout). Each site's capture is
 isolated in its own try/except so one site failing (a scraper breaking,
 a network hiccup) doesn't take down the whole cycle or block the others.
+
+Also runs the schema-v2 pipeline (vb.capture_v2/vb.pipeline.run_cycle_v2)
+as a SHADOW alongside the v1 capture/pipeline above: every v1 step is
+completely unchanged and remains the sole source of truth for the
+current dashboard/experiment, and every v2 step is wrapped in its own
+try/except that only logs on failure - a bug in the still-new v2 path
+must never be able to look like v1 itself failed, or to block v1 from
+completing. This is the deliberate first real-data cutover step noted
+in vb/capture_v2.py's and vb/pipeline.py's module docstrings: v2 starts
+accumulating genuine capture_run/source_run/signal_episode history
+under real (if currently irregular - see the audit's F-07 finding)
+production cadence, which is what Phase 4 step 4 (a time-aligned
+feature dataset) and Phase 6/7 (real evaluation, a real experiment)
+both need before they can do anything with actual data rather than
+synthetic test fixtures. It does not affect what the live dashboard
+shows or what counts as the current experiment's result - that's still
+entirely v1, per PROJECT_DOCUMENTATION.md's Phase 0/1 notices.
 """
 
 import argparse
 import logging
+import os
+import subprocess
 import sys
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -29,13 +49,20 @@ logging.basicConfig(
 )
 log = logging.getLogger("vb.scheduler")
 
-from vb.pipeline import run_cycle
+from vb.capture_v2 import end_capture_run, record_source_capture, record_source_failure, start_capture_run
+from vb.freshness import FreshnessLimits
+from vb.identity import content_hash, new_id
+from vb.models import RunStatus, StrategyDefinition
+from vb.opportunity import THRESHOLD
+from vb.pipeline import run_cycle, run_cycle_v2
 from vb.sources.loro import LoroClient
 from vb.sources.pinnacle import PinnacleClient
 from vb.sources.results import find_result
 from vb.sources.swisslos import SwisslosClient
 from vb.storage import (
+    CURRENT_SCHEMA_VERSION,
     force_resolve_stale_opportunities,
+    get_or_create_strategy_definition,
     init_db,
     list_unsettled_matches,
     prune_raw_snapshots,
@@ -46,8 +73,42 @@ from vb.storage import (
 DB_PATH = ROOT / "data" / "vb.sqlite"
 RAW_SNAPSHOT_RETENTION_HOURS = 24
 
+# Shadow-mode freshness limits (Phase 1's F-01 gate), deliberately loose
+# to match the CURRENT real (irregular - see the audit's F-07 finding:
+# median ~36min gap between scheduled runs, not the every-minute cadence
+# Phase 2's VPS migration is meant to provide) capture cadence. These are
+# NOT the tightened limits a real pre-registered experiment (Phase 7)
+# would use - they exist so shadow-mode v2 observations are eligible
+# often enough to be useful for exercising the new pipeline against real
+# data, while still being a real, honest gate rather than disabled.
+SHADOW_FRESHNESS_LIMITS = FreshnessLimits(max_age_s=3 * 3600, max_skew_s=1800, min_lead_time_s=1800)
 
-def capture_pinnacle(conn) -> None:
+
+def _git_sha() -> str:
+    sha = os.environ.get("GITHUB_SHA")
+    if sha:
+        return sha
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    except Exception:
+        return "unknown"
+
+
+def _shadow_capture_v2(conn, capture_run_id: str, site: str, mode: str, captures: list, v2_ok: list) -> None:
+    """Best-effort v2 provenance recording alongside an ALREADY-
+    successful v1 capture (this only runs after v1's own save_raw_capture
+    loop has completed without raising) - never allowed to make the
+    calling capture_* function look like it failed; a bug here is a v2
+    problem, not a "the scraper broke" problem."""
+    try:
+        record_source_capture(conn, capture_run_id, site, mode, captures)
+        v2_ok.append(True)
+    except Exception:
+        log.error("v2 shadow capture failed for %s (%s):\n%s", site, mode, traceback.format_exc())
+        v2_ok.append(False)
+
+
+def capture_pinnacle(conn, capture_run_id: str, v2_ok: list) -> None:
     client = PinnacleClient()
     rows = client.fetch_all_soccer()
     for row in rows:
@@ -56,17 +117,19 @@ def capture_pinnacle(conn) -> None:
         "pinnacle: captured %d events, %d snapshots (all soccer leagues)",
         len(rows), sum(len(r.snapshots) for r in rows),
     )
+    _shadow_capture_v2(conn, capture_run_id, "pinnacle.com", "quick", [(r.event, r.snapshots) for r in rows], v2_ok)
 
 
-def capture_swisslos(conn) -> None:
+def capture_swisslos(conn, capture_run_id: str, v2_ok: list) -> None:
     client = SwisslosClient(headless=True)
     rows = client.fetch_football()
     for row in rows:
         save_raw_capture(conn, row.event, row.snapshots)
     log.info("swisslos: captured %d events, %d snapshots", len(rows), sum(len(r.snapshots) for r in rows))
+    _shadow_capture_v2(conn, capture_run_id, "swisslos.ch", "quick", [(r.event, r.snapshots) for r in rows], v2_ok)
 
 
-def capture_swisslos_full(conn) -> None:
+def capture_swisslos_full(conn, capture_run_id: str, v2_ok: list) -> None:
     # Full country-by-country sweep (~290s) - takes much longer than the
     # quick single-page fetch_football(), which is why this runs on its
     # own, less-frequent schedule rather than every cycle. See
@@ -77,9 +140,10 @@ def capture_swisslos_full(conn) -> None:
     for row in rows:
         save_raw_capture(conn, row.event, row.snapshots)
     log.info("swisslos (full breadth): captured %d events, %d snapshots", len(rows), sum(len(r.snapshots) for r in rows))
+    _shadow_capture_v2(conn, capture_run_id, "swisslos.ch", "full", [(r.event, r.snapshots) for r in rows], v2_ok)
 
 
-def capture_swisslos_handicaps(conn) -> None:
+def capture_swisslos_handicaps(conn, capture_run_id: str, v2_ok: list) -> None:
     # Full Asian Handicap sweep: re-fetches full country breadth first
     # (to get a fresh detail_url per match - the "t=" match id isn't
     # persisted anywhere in storage, see SwisslosClient module docstring)
@@ -95,6 +159,7 @@ def capture_swisslos_handicaps(conn) -> None:
         "swisslos (full breadth, for handicap sweep): captured %d events, %d snapshots",
         len(rows), sum(len(r.snapshots) for r in rows),
     )
+    _shadow_capture_v2(conn, capture_run_id, "swisslos.ch", "full", [(r.event, r.snapshots) for r in rows], v2_ok)
 
     handicap_rows = client.fetch_all_handicaps(rows)
     for row in handicap_rows:
@@ -103,14 +168,18 @@ def capture_swisslos_handicaps(conn) -> None:
         "swisslos (asian handicap): captured handicap markets for %d/%d matches, %d snapshot(s)",
         len(handicap_rows), len(rows), sum(len(r.snapshots) for r in handicap_rows),
     )
+    _shadow_capture_v2(
+        conn, capture_run_id, "swisslos.ch", "handicap", [(r.event, r.snapshots) for r in handicap_rows], v2_ok
+    )
 
 
-def capture_loro(conn) -> None:
+def capture_loro(conn, capture_run_id: str, v2_ok: list) -> None:
     client = LoroClient(headless=True)
     rows = client.fetch_football()
     for row in rows:
         save_raw_capture(conn, row.event, row.snapshots)
     log.info("loro: captured %d events, %d snapshots", len(rows), sum(len(r.snapshots) for r in rows))
+    _shadow_capture_v2(conn, capture_run_id, "loro.ch", "quick", [(r.event, r.snapshots) for r in rows], v2_ok)
 
 
 def force_resolve_stale(conn) -> None:
@@ -152,6 +221,37 @@ def run_pipeline(conn) -> None:
         )
 
 
+def run_pipeline_v2(conn) -> None:
+    """Shadow-mode schema-v2 pipeline pass (see this module's own
+    docstring) - Method A only for now (raw edge, matching v1's real
+    production threshold), reading whatever v2 capture_v2 has recorded
+    this cycle. A Method-B shadow strategy is a trivial follow-up
+    (same call, a devigged-v1 StrategyDefinition and
+    `edge_selector=lambda leg: leg.edge_b`) once there's a reason to
+    want it running continuously rather than just tested."""
+    config = {"signal_model": "raw-v1", "threshold": THRESHOLD, "shadow_mode": True}
+    strategy = StrategyDefinition(
+        id=new_id(), signal_model="raw-v1", threshold=THRESHOLD,
+        max_age_s=SHADOW_FRESHNESS_LIMITS.max_age_s, max_skew_s=SHADOW_FRESHNESS_LIMITS.max_skew_s,
+        min_lead_time_s=SHADOW_FRESHNESS_LIMITS.min_lead_time_s, config=config,
+        config_hash=content_hash(config), created_at=datetime.now(timezone.utc),
+    )
+    get_or_create_strategy_definition(conn, strategy)
+
+    for comparison_site in ("swisslos.ch", "loro.ch"):
+        results = run_cycle_v2(
+            conn, "pinnacle.com", comparison_site, strategy, SHADOW_FRESHNESS_LIMITS,
+            edge_selector=lambda leg: leg.edge_a,
+        )
+        opened = sum(1 for r in results if r.opened)
+        closed = sum(1 for r in results if r.closed)
+        ineligible = sum(1 for r in results if r.episode_id is None and not r.opened)
+        log.info(
+            "pipeline v2 (shadow) vs %s: %d reading(s) processed (%d opened, %d closed, %d ineligible/below-threshold)",
+            comparison_site, len(results), opened, closed, ineligible,
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -171,22 +271,54 @@ def main() -> None:
     log.info("=== cycle start (full_swisslos=%s, full_handicaps=%s) ===", args.full_swisslos, args.full_handicaps)
     conn = init_db(DB_PATH)
 
+    capture_run_id = start_capture_run(conn, git_sha=_git_sha(), schema_version=CURRENT_SCHEMA_VERSION)
+    v2_ok: list = []
+
     if args.full_handicaps:
-        steps = [("pinnacle", capture_pinnacle), ("swisslos handicaps", capture_swisslos_handicaps)]
+        steps = [
+            ("pinnacle", capture_pinnacle, "pinnacle.com", "quick"),
+            ("swisslos handicaps", capture_swisslos_handicaps, "swisslos.ch", "handicap"),
+        ]
     else:
         swisslos_fn = capture_swisslos_full if args.full_swisslos else capture_swisslos
-        steps = [("pinnacle", capture_pinnacle), ("swisslos", swisslos_fn), ("loro", capture_loro)]
+        swisslos_mode = "full" if args.full_swisslos else "quick"
+        steps = [
+            ("pinnacle", capture_pinnacle, "pinnacle.com", "quick"),
+            ("swisslos", swisslos_fn, "swisslos.ch", swisslos_mode),
+            ("loro", capture_loro, "loro.ch", "quick"),
+        ]
 
-    for name, fn in steps:
+    for name, fn, site, mode in steps:
         try:
-            fn(conn)
+            fn(conn, capture_run_id, v2_ok)
         except Exception:
             log.error("%s capture failed:\n%s", name, traceback.format_exc())
+            # F-16: a failed v1 fetch still gets a terminal, honest v2
+            # source_run row - "no status at all" is exactly what let a
+            # partial-failure cycle look like it never ran.
+            try:
+                record_source_failure(conn, capture_run_id, site, mode, error_code="fetch_failed", error_summary=str(sys.exc_info()[1]))
+            except Exception:
+                log.error("v2 shadow failure-recording itself failed for %s:\n%s", site, traceback.format_exc())
+            v2_ok.append(False)
+
+    try:
+        end_capture_run(
+            conn, capture_run_id,
+            RunStatus.SUCCESS if all(v2_ok) else (RunStatus.PARTIAL if any(v2_ok) else RunStatus.FAILED),
+        )
+    except Exception:
+        log.error("v2 end_capture_run failed:\n%s", traceback.format_exc())
 
     try:
         run_pipeline(conn)
     except Exception:
         log.error("pipeline run failed:\n%s", traceback.format_exc())
+
+    try:
+        run_pipeline_v2(conn)
+    except Exception:
+        log.error("pipeline v2 (shadow) run failed:\n%s", traceback.format_exc())
 
     try:
         force_resolve_stale(conn)
