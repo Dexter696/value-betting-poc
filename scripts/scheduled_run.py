@@ -50,11 +50,13 @@ logging.basicConfig(
 log = logging.getLogger("vb.scheduler")
 
 from vb.capture_v2 import end_capture_run, record_source_capture, record_source_failure, start_capture_run
+from vb.decision_runner import process_cycle_decisions
 from vb.freshness import FreshnessLimits
 from vb.identity import content_hash, new_id
 from vb.models import RunStatus, StrategyDefinition
 from vb.opportunity import THRESHOLD
 from vb.pipeline import run_cycle, run_cycle_v2
+from vb.strategy import ImmediateEntryPolicy
 from vb.sources.loro import LoroClient
 from vb.sources.pinnacle import PinnacleClient
 from vb.sources.results import find_result
@@ -238,6 +240,7 @@ def run_pipeline_v2(conn) -> None:
     )
     get_or_create_strategy_definition(conn, strategy)
 
+    entry_policy = ImmediateEntryPolicy(threshold=THRESHOLD)
     for comparison_site in ("swisslos.ch", "loro.ch"):
         results = run_cycle_v2(
             conn, "pinnacle.com", comparison_site, strategy, SHADOW_FRESHNESS_LIMITS,
@@ -250,6 +253,13 @@ def run_pipeline_v2(conn) -> None:
             "pipeline v2 (shadow) vs %s: %d reading(s) processed (%d opened, %d closed, %d ineligible/below-threshold)",
             comparison_site, len(results), opened, closed, ineligible,
         )
+
+        executions = process_cycle_decisions(conn, results, entry_policy)
+        if executions:
+            log.info(
+                "decisions v2 (shadow) vs %s: %d new bet_decision/bet_execution recorded",
+                comparison_site, len(executions),
+            )
 
 
 def main() -> None:

@@ -944,6 +944,99 @@ def save_signal_observation(conn: sqlite3.Connection, obs: SignalObservation) ->
     return obs.id
 
 
+def load_signal_episode(conn: sqlite3.Connection, episode_id: str) -> Optional[SignalEpisode]:
+    """Load one episode by id regardless of open/closed state - unlike
+    find_open_signal_episode, which only ever finds currently-open ones.
+    Needed once a caller only has an episode_id in hand (e.g. from an
+    EpisodeIngestResult) and needs its market_identity_id back."""
+    row = conn.execute(
+        "SELECT id, strategy_version, market_identity_id, started_at, ended_at, end_reason "
+        "FROM signal_episode WHERE id = ?",
+        (episode_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return SignalEpisode(
+        id=row[0], strategy_version=row[1], market_identity_id=row[2],
+        started_at=_from_iso(row[3]), ended_at=_from_iso(row[4]) if row[4] else None,
+        end_reason=EpisodeEndReason(row[5]) if row[5] else None,
+    )
+
+
+def list_signal_observations(conn: sqlite3.Connection, episode_id: str) -> list[SignalObservation]:
+    """Every observation recorded against one episode, oldest first -
+    the full history an entry policy (vb.strategy) needs to evaluate,
+    not just the latest one."""
+    rows = conn.execute(
+        """
+        SELECT id, episode_id, decision_time, benchmark_snapshot_id, comparison_snapshot_id,
+               edge_model, edge, eligible, reject_reason
+        FROM signal_observation WHERE episode_id = ? ORDER BY decision_time ASC
+        """,
+        (episode_id,),
+    ).fetchall()
+    return [
+        SignalObservation(
+            id=row[0], episode_id=row[1], decision_time=_from_iso(row[2]), benchmark_snapshot_id=row[3],
+            comparison_snapshot_id=row[4], edge_model=row[5], edge=row[6], eligible=bool(row[7]),
+            reject_reason=RejectReason(row[8]) if row[8] else None,
+        )
+        for row in rows
+    ]
+
+
+def find_latest_snapshot_for_event_version(
+    conn: sqlite3.Connection, event_version_id: str, market_type: MarketType, line: Optional[float]
+) -> Optional[MarketSnapshotV2]:
+    """The most recent SUCCESS-run snapshot for a specific
+    (event_version, market_type, line) - used to re-check "what odds
+    are available right now" for a leg that already has an open
+    episode, independent of which observation originally triggered it
+    (vb.decision_runner). NULL-safe on `line` (SQLite's `=` never
+    matches NULL, so the query branches instead of relying on it)."""
+    if line is None:
+        row = conn.execute(
+            """
+            SELECT m.id FROM market_snapshot_v2 m JOIN source_run sr ON sr.id = m.source_run_id
+            WHERE m.event_version_id = ? AND m.market_type = ? AND m.line IS NULL AND sr.status = 'success'
+            ORDER BY m.received_at DESC LIMIT 1
+            """,
+            (event_version_id, market_type.value),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT m.id FROM market_snapshot_v2 m JOIN source_run sr ON sr.id = m.source_run_id
+            WHERE m.event_version_id = ? AND m.market_type = ? AND m.line = ? AND sr.status = 'success'
+            ORDER BY m.received_at DESC LIMIT 1
+            """,
+            (event_version_id, market_type.value, line),
+        ).fetchone()
+    if row is None:
+        return None
+    return load_market_snapshot_v2(conn, row[0])
+
+
+def load_market_snapshot_v2(conn: sqlite3.Connection, snapshot_id: str) -> Optional[MarketSnapshotV2]:
+    row = conn.execute(
+        """
+        SELECT id, source_run_id, event_version_id, market_type, line, outcomes_json,
+               max_bet_size, observed_at, received_at, request_started_at, request_finished_at
+        FROM market_snapshot_v2 WHERE id = ?
+        """,
+        (snapshot_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    outcomes = tuple(Outcome(Selection(o["selection"]), o["odds"]) for o in json.loads(row[5]))
+    return MarketSnapshotV2(
+        id=row[0], source_run_id=row[1], event_version_id=row[2], market_type=MarketType(row[3]), line=row[4],
+        outcomes=outcomes, max_bet_size=row[6], observed_at=_from_iso(row[7]) if row[7] else None,
+        received_at=_from_iso(row[8]), request_started_at=_from_iso(row[9]) if row[9] else None,
+        request_finished_at=_from_iso(row[10]) if row[10] else None,
+    )
+
+
 def save_bet_decision(conn: sqlite3.Connection, decision: BetDecision) -> str:
     """UNIQUE(idempotency_key) at the schema level means a second
     attempt to record the same logical decision raises IntegrityError

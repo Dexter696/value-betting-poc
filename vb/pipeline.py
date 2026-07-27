@@ -95,6 +95,40 @@ def market_key(
     return f"{benchmark_event.site}:{benchmark_event.event_id}:{market_type.value}:{line}:{selection.value}:vs:{comparison_site}"
 
 
+@dataclass(frozen=True)
+class ParsedMarketIdentity:
+    benchmark_site: str
+    benchmark_event_id: str
+    market_type: MarketType
+    line: Optional[float]
+    selection: Selection
+    comparison_site: str
+
+
+def parse_market_identity(market_identity_id: str) -> ParsedMarketIdentity:
+    """Inverts market_key() — used by callers (vb.decision_runner) that
+    only have a market_identity_id/SignalEpisode in hand and need the
+    real site/event/market/selection back to look up live odds. Splits
+    on the ":vs:" delimiter first to isolate comparison_site (chosen in
+    market_key() specifically because it can't appear in a site name or
+    enum value), then takes market_type/line/selection off the right
+    end, since those are fixed enum/float values that never contain a
+    colon — whatever's left in the middle is the event_id, rejoined
+    with ":" in case it ever legitimately contains one.
+    """
+    left, comparison_site = market_identity_id.rsplit(":vs:", 1)
+    parts = left.split(":")
+    site = parts[0]
+    selection = Selection(parts[-1])
+    line = None if parts[-2] == "None" else float(parts[-2])
+    market_type = MarketType(parts[-3])
+    event_id = ":".join(parts[1:-3])
+    return ParsedMarketIdentity(
+        benchmark_site=site, benchmark_event_id=event_id, market_type=market_type,
+        line=line, selection=selection, comparison_site=comparison_site,
+    )
+
+
 def full_market_json(leg: LegEdge) -> dict:
     """Both books' full market (every outcome + margin), per the
     methodology's "full market snapshot" requirement. Only the two sides
