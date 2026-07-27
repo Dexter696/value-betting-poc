@@ -40,6 +40,24 @@ def test_f14_global_assignment_beats_greedy_on_the_audits_own_example():
     assert assignment == {"pA": "sY", "pB": "sX"}  # global optimum reassigns A, matches both
 
 
+def test_blocking_tolerates_token_reordering_across_language_variants_of_a_competition_name():
+    # Real production bug: normalize_competition("Austria - Bundesliga")
+    # -> "austria bundesliga", normalize_competition("Bundesliga Autriche")
+    # -> "bundesliga austria" - same tokens, different string, so an
+    # exact `!=` check on the normalized output (the original
+    # implementation) NEVER blocks these together, silently producing
+    # zero matches across an entire real production dataset despite
+    # dozens of genuine AUTO-tier matches existing. _blocks() must use
+    # fuzzy similarity, not exact equality, on competition names.
+    a = _event("pinnacle.com", "LASK Linz", "Grazer AK", competition="Austria - Bundesliga", event_id="pA")
+    x = _event("swisslos.ch", "LASK", "Grazer", competition="Bundesliga Autriche", event_id="sX")
+
+    matches = match_events_v2([a], [x])
+
+    assert len(matches) == 1
+    assert matches[0].tier == MatchTier.AUTO
+
+
 def test_unrelated_events_in_different_blocks_never_compete():
     a = _event("pinnacle.com", "Liverpool", "Everton", T0, event_id="pA")
     x = _event("swisslos.ch", "Liverpool", "Everton", T0, event_id="sX")

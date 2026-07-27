@@ -112,17 +112,50 @@ def score_oriented_pair(anchor: RawEvent, candidate: RawEvent) -> Optional[Orien
     )
 
 
+COMPETITION_BLOCK_THRESHOLD = 0.5
+# Loose fuzzy floor for grouping into a block - NOT the AUTO/REVIEW/
+# REJECT decision, which is made later by score_oriented_pair's full
+# weighted formula (competition is only 15% of that score). Calibrated
+# against real production data: genuinely-the-same competition scores
+# >= 0.76 even across languages/naming conventions ("Austria -
+# Bundesliga" vs "Bundesliga Autriche" -> 1.0, "2. Bundesliga" vs
+# "Bundesliga" -> 0.909), while clearly different competitions score
+# <= 0.57 ("Premier League" vs "Serie A" -> 0.476, "La Liga" vs
+# "Ligue 1" -> 0.571) - see vb/tests/test_market_mapping.py for the
+# regression that pins this down. A stray pair that slips through this
+# loose floor still gets correctly rejected by score_oriented_pair's
+# own team-name/time signal, so this only needs to avoid EXCLUDING a
+# real match, not to be precise.
+_COMPETITION_SIMILARITY_CACHE: dict[tuple[str, str], float] = {}
+
+
 def _blocks(anchor_events: list[RawEvent], candidate_events: list[RawEvent]) -> list[tuple[list[RawEvent], list[RawEvent]]]:
     """Group anchor+candidate events into blocks via connected
-    components over the "same competition AND within the kickoff time
-    tolerance" relation, so the bipartite assignment below only ever
-    competes events that could plausibly be the same fixture. Uses
-    connected components (not fixed-width time buckets) so two events
-    14 minutes apart never get artificially split across a bucket
-    boundary just because a third event's timestamp happened to fall
-    between them.
+    components over the "same sport AND within the kickoff time
+    tolerance AND plausibly the same competition" relation, so the
+    bipartite assignment below only ever competes events that could
+    plausibly be the same fixture. Uses connected components (not
+    fixed-width time buckets) so two events 14 minutes apart never get
+    artificially split across a bucket boundary just because a third
+    event's timestamp happened to fall between them.
+
+    Competition matching here is FUZZY (_name_similarity, same as
+    score_oriented_pair's own team/competition scoring) against
+    COMPETITION_BLOCK_THRESHOLD, never exact string equality - an
+    earlier version of this function used `!=` on
+    normalize_competition()'s output directly, which is NOT
+    token-order-stable ("Austria - Bundesliga" normalizes to "austria
+    bundesliga", "Bundesliga Autriche" to "bundesliga austria" - two
+    different strings, same tokens) and silently produced zero blocks
+    (hence zero matches) in real production data despite 80 genuine
+    AUTO-tier matches existing between the same two sites that cycle.
+    _time_score is checked first since it's far cheaper than the fuzzy
+    string comparison and rejects the vast majority of pairs outright
+    (most events across a whole day's captures aren't within 15
+    minutes of each other).
     """
     all_events: list[RawEvent] = anchor_events + candidate_events
+    normalized_competitions = [normalize_competition(e.competition) for e in all_events]
     parent = list(range(len(all_events)))
 
     def find(i: int) -> int:
@@ -136,14 +169,22 @@ def _blocks(anchor_events: list[RawEvent], candidate_events: list[RawEvent]) -> 
         if ri != rj:
             parent[ri] = rj
 
+    def competition_similarity(na: str, nb: str) -> float:
+        key = (na, nb) if na <= nb else (nb, na)
+        cached = _COMPETITION_SIMILARITY_CACHE.get(key)
+        if cached is None:
+            cached = _name_similarity(na, nb)
+            _COMPETITION_SIMILARITY_CACHE[key] = cached
+        return cached
+
     for i in range(len(all_events)):
         for j in range(i + 1, len(all_events)):
             a, b = all_events[i], all_events[j]
             if a.sport != b.sport:
                 continue
-            if normalize_competition(a.competition) != normalize_competition(b.competition):
-                continue
             if _time_score(a.kickoff_utc, b.kickoff_utc) is None:
+                continue
+            if competition_similarity(normalized_competitions[i], normalized_competitions[j]) < COMPETITION_BLOCK_THRESHOLD:
                 continue
             union(i, j)
 
@@ -159,6 +200,23 @@ def _blocks(anchor_events: list[RawEvent], candidate_events: list[RawEvent]) -> 
     return [(a, c) for a, c in groups.values() if a and c]
 
 
+# A finite (never -inf) sentinel for "no valid pairing" in the score
+# matrix below. scipy.optimize.linear_sum_assignment must find a
+# complete assignment (one entry per row, for however many rows the
+# matrix has) even when most of a block's anchor/candidate pairs are
+# genuinely impossible (different real fixtures that just happened to
+# land in the same competition+time block) - an -inf entry makes that
+# assignment infeasible outright ("cost matrix is infeasible") the
+# moment any row or column has no real candidate at all, which is the
+# common case once blocking no longer requires an exact competition
+# match. A merely-very-bad finite score keeps the assignment solvable;
+# _UNMATCHABLE_SCORE is far below any real score_oriented_pair result
+# (always in roughly [0, 1]), and any row/column forced onto it is
+# filtered back out below via the `scored.get((i, j))` lookup, which
+# only has entries for pairs score_oriented_pair actually accepted.
+_UNMATCHABLE_SCORE = -1e6
+
+
 def match_events_v2(anchor_events: list[RawEvent], candidate_events: list[RawEvent]) -> list[OrientedEventMatch]:
     """Globally-optimal replacement for vb.matching.match_events(): each
     (competition, kickoff-window) block is solved as a maximum-weight
@@ -169,7 +227,7 @@ def match_events_v2(anchor_events: list[RawEvent], candidate_events: list[RawEve
 
     for block_anchors, block_candidates in _blocks(anchor_events, candidate_events):
         scored: dict[tuple[int, int], OrientedEventMatch] = {}
-        score_matrix = [[float("-inf")] * len(block_candidates) for _ in block_anchors]
+        score_matrix = [[_UNMATCHABLE_SCORE] * len(block_candidates) for _ in block_anchors]
         for i, anchor in enumerate(block_anchors):
             for j, candidate in enumerate(block_candidates):
                 m = score_oriented_pair(anchor, candidate)
