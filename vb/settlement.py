@@ -28,6 +28,12 @@ class SettlementResult(str, Enum):
 
 
 def settle_match_winner(selection: Selection, home_goals: int, away_goals: int) -> SettlementResult:
+    # F-19: explicitly validate the selection belongs to this market
+    # rather than letting a wrong-market selection (e.g. OVER passed in
+    # by a bug upstream) silently settle as LOST just because it never
+    # equals `winner` - a wrong selection should raise, not settle.
+    if selection not in (Selection.HOME, Selection.DRAW, Selection.AWAY):
+        raise ValueError(f"settle_match_winner: invalid selection {selection!r} - must be HOME, DRAW, or AWAY")
     if home_goals == away_goals:
         winner = Selection.DRAW
     elif home_goals > away_goals:
@@ -38,6 +44,12 @@ def settle_match_winner(selection: Selection, home_goals: int, away_goals: int) 
 
 
 def settle_totals(selection: Selection, line: float, home_goals: int, away_goals: int) -> SettlementResult:
+    # F-19: the old code handled OVER explicitly and treated ANYTHING
+    # else as UNDER - a HOME/AWAY/DRAW selection reaching this function
+    # (a real possibility if market-matching ever mismatches a totals
+    # leg) would silently settle as if it were UNDER instead of raising.
+    if selection not in (Selection.OVER, Selection.UNDER):
+        raise ValueError(f"settle_totals: invalid selection {selection!r} - must be OVER or UNDER")
     total = home_goals + away_goals
     if total == line:
         return SettlementResult.PUSH
@@ -49,6 +61,11 @@ def settle_totals(selection: Selection, line: float, home_goals: int, away_goals
 
 def _settle_handicap_half_line(selection: Selection, half_line: float, home_goals: int, away_goals: int) -> SettlementResult:
     """Settle a single whole/half handicap line (not a quarter line)."""
+    # F-19: same fix as settle_totals - HOME was explicit, everything
+    # else (a genuinely invalid OVER/UNDER/DRAW selection reaching a
+    # handicap settlement) used to be silently treated as AWAY.
+    if selection not in (Selection.HOME, Selection.AWAY):
+        raise ValueError(f"settle_handicap: invalid selection {selection!r} - must be HOME or AWAY")
     adjusted_diff = (home_goals + half_line) - away_goals  # > 0 means home covers
     if adjusted_diff == 0:
         return SettlementResult.PUSH
@@ -66,6 +83,9 @@ _QUARTER_COMBINATIONS = {
 }
 
 
+_LINE_ALIGNMENT_TOLERANCE = 1e-6  # absorbs float rounding only, never a real quarter-point ambiguity
+
+
 def settle_handicap(selection: Selection, line: float, home_goals: int, away_goals: int) -> SettlementResult:
     """Quarter lines (e.g. -0.25, -0.75) split the stake across the two
     adjacent whole/half lines — settled here as the combination of both
@@ -74,6 +94,12 @@ def settle_handicap(selection: Selection, line: float, home_goals: int, away_goa
     bets.
     """
     quarter_units = round(line * 4)
+    # F-19: `round(line * 4)` alone will silently snap any line that's
+    # merely CLOSE to a quarter-point (a bad float, a parser bug) to
+    # the nearest one instead of catching the discrepancy - validate
+    # the line is actually aligned before trusting the rounded value.
+    if abs(line - quarter_units / 4) > _LINE_ALIGNMENT_TOLERANCE:
+        raise ValueError(f"settle_handicap: line {line} is not aligned to a quarter-point (0.25) step")
     is_quarter_line = quarter_units % 2 != 0
     if not is_quarter_line:
         return _settle_handicap_half_line(selection, line, home_goals, away_goals)
