@@ -22,6 +22,9 @@ from .models import (
     CanonicalEvent,
     CaptureRun,
     ClosingSnapshot,
+    EvaluationRun,
+    ResultEvidence,
+    SettlementVersion,
     EpisodeEndReason,
     EventMatchV2,
     EventVersionV2,
@@ -973,6 +976,81 @@ def save_bet_execution(conn: sqlite3.Connection, execution: BetExecution) -> str
     )
     conn.commit()
     return execution.id
+
+
+def save_result_evidence(conn: sqlite3.Connection, evidence: ResultEvidence) -> str:
+    """Insert-only - a new capture attempt for the same event is a NEW
+    evidence row, never an update to an old one (F-17's whole point:
+    keep every attempt, don't let a later fetch silently erase what an
+    earlier one actually returned)."""
+    conn.execute(
+        """
+        INSERT INTO result_evidence (
+            id, canonical_event_id, provider, provider_event_id, source_url, retrieved_at,
+            home_goals, away_goals, status, raw_payload_hash, reviewer, reviewed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (evidence.id, evidence.canonical_event_id, evidence.provider, evidence.provider_event_id,
+         evidence.source_url, _to_iso(evidence.retrieved_at), evidence.home_goals, evidence.away_goals,
+         evidence.status, evidence.raw_payload_hash, evidence.reviewer,
+         _to_iso(evidence.reviewed_at) if evidence.reviewed_at else None),
+    )
+    conn.commit()
+    return evidence.id
+
+
+def save_settlement_version(conn: sqlite3.Connection, version: SettlementVersion) -> str:
+    """Insert-only. `supersedes_id`, if set, must point at a row that
+    already exists - the caller (vb.settlement_evidence) is responsible
+    for looking up the row being corrected and passing its id; this
+    function never mutates that old row."""
+    conn.execute(
+        """
+        INSERT INTO settlement_version (id, settlement_key, evidence_id, algorithm_version, result, created_at, supersedes_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (version.id, version.settlement_key, version.evidence_id, version.algorithm_version,
+         version.result, _to_iso(version.created_at), version.supersedes_id),
+    )
+    conn.commit()
+    return version.id
+
+
+def current_settlement_version(conn: sqlite3.Connection, settlement_key: str) -> Optional[SettlementVersion]:
+    """The most recent (by created_at) settlement_version row for a
+    settlement_key - the one an evaluation should actually use. Older,
+    superseded rows stay in the table for audit but are never read by
+    default."""
+    row = conn.execute(
+        """
+        SELECT id, settlement_key, evidence_id, algorithm_version, result, created_at, supersedes_id
+        FROM settlement_version WHERE settlement_key = ? ORDER BY created_at DESC LIMIT 1
+        """,
+        (settlement_key,),
+    ).fetchone()
+    if row is None:
+        return None
+    return SettlementVersion(
+        id=row[0], settlement_key=row[1], evidence_id=row[2], algorithm_version=row[3],
+        result=row[4], created_at=_from_iso(row[5]), supersedes_id=row[6],
+    )
+
+
+def save_evaluation_run(conn: sqlite3.Connection, run: EvaluationRun) -> str:
+    """Insert-only - every evaluation report ever generated stays
+    queryable by its own id, so a report shared externally can always
+    be traced back to the exact code/config/data it was computed
+    from (F-06/F-20)."""
+    conn.execute(
+        """
+        INSERT INTO evaluation_run (id, code_sha, config_hash, db_snapshot_hash, data_cutoff, created_at, metrics_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (run.id, run.code_sha, run.config_hash, run.db_snapshot_hash, _to_iso(run.data_cutoff),
+         _to_iso(run.created_at), canonical_json(run.metrics)),
+    )
+    conn.commit()
+    return run.id
 
 
 def save_closing_snapshot(conn: sqlite3.Connection, snapshot: ClosingSnapshot) -> str:

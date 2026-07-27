@@ -52,3 +52,11 @@ def content_hash(obj: dict) -> str:
     evaluation_run's code/config/data provenance hashes.
     """
     return hashlib.sha256(canonical_json(obj).encode("utf-8")).hexdigest()
+
+
+def content_hash_bytes(data: bytes) -> str:
+    """SHA-256 of raw bytes, unencoded - for archiving a raw source
+    response (vb.settlement_evidence's content-addressed archive, F-17)
+    where the payload isn't JSON-serializable data but the literal HTTP
+    response body."""
+    return hashlib.sha256(data).hexdigest()

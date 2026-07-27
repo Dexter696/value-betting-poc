@@ -345,6 +345,62 @@ class BetExecution:
 
 
 @dataclass(frozen=True)
+class ResultEvidence:
+    """The auditable replacement for v1 settlement.source being a bare
+    string like "manual" or "manual:websearch" (F-17). An automatic
+    source records `raw_payload_hash` (content-addressed archive of the
+    real response - see vb.settlement_evidence); a manual correction
+    is expected to carry `source_url`, `reviewer`, and `reviewed_at`
+    instead, per the audit's own remediation text ("manual correction
+    should require a URL, reviewer, and reason")."""
+
+    id: str
+    canonical_event_id: str
+    provider: str
+    retrieved_at: datetime
+    status: str
+    provider_event_id: Optional[str] = None
+    source_url: Optional[str] = None
+    home_goals: Optional[int] = None
+    away_goals: Optional[int] = None
+    raw_payload_hash: Optional[str] = None
+    reviewer: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
+
+
+@dataclass(frozen=True)
+class SettlementVersion:
+    """Versioned settlement result (F-17) - a correction creates a NEW
+    row with `supersedes_id` pointing at the row it replaces; the old
+    row is never edited or deleted, so a later correction can never
+    silently rewrite what an earlier evaluation actually used."""
+
+    id: str
+    settlement_key: str
+    evidence_id: str
+    algorithm_version: str
+    result: str  # a SettlementResult.value - kept as str to avoid a settlement.py <-> models.py import cycle
+    created_at: datetime
+    supersedes_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class EvaluationRun:
+    """One evaluation report's full provenance (F-06/F-20) - code SHA,
+    config hash, exact DB snapshot hash, and data cutoff, embedded in
+    the report itself so it can never be mistaken for describing a
+    different code/data state than it actually used."""
+
+    id: str
+    code_sha: str
+    config_hash: str
+    db_snapshot_hash: str
+    data_cutoff: datetime
+    created_at: datetime
+    metrics: dict
+
+
+@dataclass(frozen=True)
 class ClosingSnapshot:
     """A market's consensus closing price - the reference point CLV
     (closing-line value, vb.closing) is measured against. Populated by
