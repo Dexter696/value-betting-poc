@@ -147,6 +147,38 @@ def test_ineligible_reading_recorded_but_never_opens_an_episode(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM signal_episode").fetchone()[0] == 0
 
 
+def test_repeated_ineligible_reading_on_an_open_episode_is_a_no_op_not_a_crash(tmp_path):
+    # Found live 2026-07-28: if the "latest" snapshot pair for a market
+    # hasn't changed since the last cycle (a real possibility under an
+    # irregular capture cadence, F-07) and that pair is freshness-
+    # ineligible, re-ingesting it used to unconditionally try to
+    # INSERT a second signal_observation row identical to the one
+    # already recorded - violating the UNIQUE(episode_id,
+    # benchmark_snapshot_id, comparison_snapshot_id, edge_model)
+    # constraint and crashing the whole pipeline cycle.
+    conn = _db(tmp_path)
+    strategy_id = _strategy_id(conn)
+    tracker = EpisodeTracker(conn, strategy_id, MARKET_IDENTITY, threshold=0.03)
+
+    open_result = tracker.ingest(_reading(conn, 0, 0.05))
+    assert open_result.opened
+
+    stale_reading = _reading(conn, 5, 0.05, eligible=False, reject_reason=RejectReason.BENCHMARK_STALE)
+    first = tracker.ingest(stale_reading)
+    assert first.observation_id is not None
+
+    # a second cycle re-evaluates the SAME (still-frozen) snapshot pair -
+    # must be a silent no-op, not a crash
+    second = tracker.ingest(stale_reading)
+    assert second.observation_id is None
+    assert second.episode_id == open_result.episode_id
+
+    count = conn.execute(
+        "SELECT COUNT(*) FROM signal_observation WHERE episode_id = ? AND eligible = 0", (open_result.episode_id,)
+    ).fetchone()[0]
+    assert count == 1  # not 2 - the duplicate was skipped, not inserted twice
+
+
 def test_ingest_ignores_a_reading_no_newer_than_the_last_one(tmp_path):
     conn = _db(tmp_path)
     strategy_id = _strategy_id(conn)

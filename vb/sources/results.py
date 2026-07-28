@@ -107,11 +107,25 @@ _TOP_FLIGHT_NAMES = {
     "premier league", "division 1", "liga mx", "brasileirao", "serie a",
     "primera division", "liga profesional", "liga pro", "eredivisie", "ligue 1",
     "bundesliga", "super lig", "allsvenskan", "eliteserien", "superliga",
-    "liga i", "premiership", "liga auf uruguaya", "super league",
+    "liga i", "liga 1", "premiership", "liga auf uruguaya", "super league",
+    "major league soccer", "first liga",
+    # "liga 1" added alongside the existing "liga i" (roman numeral) -
+    # confirmed live 2026-07-28 that Pinnacle formats Romania's top
+    # flight with an arabic "1", not the roman numeral "I" this set
+    # already expected, so it was silently falling through to manual
+    # entry despite the country/slug being otherwise fully supported.
+    # "major league soccer"/"first liga" (USA/Czech Republic) were
+    # confirmed live the same day: 10 unsettled MLS matches and 3
+    # unsettled Czech First Liga matches were sitting unrecognized even
+    # though usa.1/cze.1 both return real, complete fixtures on ESPN -
+    # the country+slug mapping was already correct, only the league-name
+    # string was missing from this set.
 }
 _SECOND_TIER_NAMES = {
     "championship", "division 2", "serie b", "ligue 2", "2. bundesliga",
-    "segunda division", "primera b", "challenge league",
+    "segunda division", "primera b", "challenge league", "superettan",
+    # "superettan" (Sweden's 2nd tier) confirmed live 2026-07-28 -
+    # swe.2 is a real, working ESPN slug, just never listed here.
 }
 
 
@@ -171,6 +185,16 @@ _TEAM_ALIASES: dict[str, str] = {
     "leicester": "leicester city", "newcastle": "newcastle united", "west ham": "west ham united",
     "brighton": "brighton and hove albion", "nottm forest": "nottingham forest",
     "dortmund": "borussia dortmund", "bayern": "bayern munich",
+    # Confirmed live 2026-07-28 against real, currently-unsettled
+    # matches: Pinnacle's short/English club name vs ESPN's fuller/
+    # native-language displayName scored well below MIN_TEAM_SIMILARITY
+    # (55-78/100) despite being the exact same real fixture on the exact
+    # same date in the exact same league - not a stray one-off, the same
+    # short-vs-long-name pattern the existing aliases above already
+    # exist for, just for different clubs.
+    "kalmar": "kalmar ff", "mjallby": "mjallby aif", "lyngby": "lyngby boldklub",
+    "zhejiang": "zhejiang professional",
+    "copenhagen": "f c kobenhavn",  # Pinnacle: "FC Copenhagen" (English); ESPN: "F.C. København" (Danish)
 }
 
 

@@ -54,3 +54,33 @@ def test_team_similarity_low_for_derby_rivals_sharing_a_city_name():
     # docstring) scored this 100/100, which would have been a real
     # false-positive risk.
     assert _team_similarity("AC Milan", "Inter Milan") < MIN_TEAM_SIMILARITY
+
+
+def test_slug_for_major_league_soccer():
+    # Real coverage gap found 2026-07-28: usa.1 is a real, working ESPN
+    # slug (confirmed live), but "major league soccer" was never listed
+    # in _TOP_FLIGHT_NAMES - 10 real MLS matches sat unsettled.
+    assert _espn_slug_for("USA - Major League Soccer") == "usa.1"
+
+
+def test_slug_for_czech_first_liga():
+    assert _espn_slug_for("Czech Republic - First Liga") == "cze.1"
+
+
+def test_slug_for_romania_liga_1_with_arabic_numeral():
+    # Pinnacle formats this with an arabic "1", not the roman numeral
+    # "I" _TOP_FLIGHT_NAMES already had an entry for.
+    assert _espn_slug_for("Romania - Liga 1") == "rou.1"
+
+
+def test_slug_for_sweden_superettan_second_tier():
+    assert _espn_slug_for("Sweden - Superettan") == "swe.2"
+
+
+def test_team_similarity_matches_short_pinnacle_name_via_new_aliases():
+    # Confirmed live 2026-07-28 against real unsettled matches: Pinnacle's
+    # short name vs ESPN's fuller/native-language displayName scored
+    # 55-78/100 without these aliases - well below MIN_TEAM_SIMILARITY.
+    assert _team_similarity("Kalmar", "Kalmar FF") >= MIN_TEAM_SIMILARITY
+    assert _team_similarity("Zhejiang", "Zhejiang Professional FC") >= MIN_TEAM_SIMILARITY
+    assert _team_similarity("FC Copenhagen", "F.C. København") >= MIN_TEAM_SIMILARITY

@@ -114,6 +114,23 @@ class EpisodeTracker:
             # F-01: a rejected pair is still an auditable observation,
             # tied to the currently-open episode if there is one (so its
             # trajectory shows the reject), but never opens or extends one.
+            #
+            # Guarded the same way the eligible path below is guarded:
+            # if the underlying data hasn't advanced since the last
+            # recorded observation (the market's "latest" snapshot pair
+            # is unchanged - a real possibility under an irregular
+            # capture cadence, F-07), re-recording it would violate
+            # signal_observation's UNIQUE(episode_id, benchmark_snapshot_id,
+            # comparison_snapshot_id, edge_model) constraint and crash
+            # the whole pipeline cycle (found live 2026-07-28) - skip as
+            # a no-op instead. Only relevant when there's an open
+            # episode to check against; a NULL episode_id never
+            # collides with another NULL under SQL's own NULL != NULL
+            # semantics, so no guard is needed when existing is None.
+            if existing is not None:
+                last_at = self._last_observation_time(existing.id)
+                if last_at is not None and reading.received_at <= last_at:
+                    return EpisodeIngestResult(episode_id=existing.id, observation_id=None)
             obs_id = self._record_observation(reading, existing.id if existing else None)
             return EpisodeIngestResult(episode_id=existing.id if existing else None, observation_id=obs_id)
 
