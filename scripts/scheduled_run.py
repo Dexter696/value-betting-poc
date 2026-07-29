@@ -52,9 +52,10 @@ log = logging.getLogger("vb.scheduler")
 from vb.capture_v2 import end_capture_run, record_source_capture, record_source_failure, start_capture_run
 from vb.closing import process_cycle_closings
 from vb.decision_runner import process_cycle_decisions
+from vb.evaluation_runner import run_evaluation
 from vb.exposure import ExposureLimits
 from vb.freshness import FreshnessLimits
-from vb.identity import content_hash, new_id
+from vb.identity import content_hash, content_hash_bytes, new_id
 from vb.models import RunStatus, StrategyDefinition
 from vb.opportunity import THRESHOLD
 from vb.pipeline import run_cycle, run_cycle_v2
@@ -240,6 +241,31 @@ def auto_settle(conn) -> None:
     log.info("auto-settle: %d/%d unsettled match(es) resolved via ESPN", settled_count, len(unsettled))
 
 
+def run_daily_evaluation(conn, strategy_version: str) -> None:
+    """Generates a real evaluation_run row (Phase 6) from the v2 shadow
+    pipeline's actual decisions/executions/settlements-to-date -
+    vb.evaluation_runner.run_evaluation() was built and tested this
+    session but never wired into anything that actually runs, so no
+    real evaluation_run row had ever accumulated outside of one-off
+    manual invocations. Piggybacks on the once-daily handicap-sweep
+    cron as a low-frequency trigger (the same pattern
+    scripts/scheduled_run.py's DB-backup step already uses in
+    capture.yml) - a full evaluation report over the whole decision
+    history isn't something worth regenerating every 5 minutes.
+    """
+    now = datetime.now(timezone.utc)
+    config = {"signal_model": "raw-v1", "threshold": THRESHOLD, "shadow_mode": True}
+    db_snapshot_hash = content_hash_bytes(DB_PATH.read_bytes())
+    report = run_evaluation(
+        conn, strategy_version, code_sha=_git_sha(), config=config,
+        db_snapshot_hash=db_snapshot_hash, data_cutoff=now, now=now,
+    )
+    log.info(
+        "daily evaluation v2 (shadow): %d decision(s), %d settled bet(s), total_profit=%.2f",
+        report["metrics"]["total_decisions"], report["metrics"]["settled_bets"], report["metrics"]["total_profit"],
+    )
+
+
 def run_pipeline(conn) -> None:
     for comparison_site in ("swisslos.ch", "loro.ch"):
         touched = run_cycle(conn, "pinnacle.com", comparison_site)
@@ -251,7 +277,7 @@ def run_pipeline(conn) -> None:
         )
 
 
-def run_pipeline_v2(conn) -> None:
+def run_pipeline_v2(conn) -> str:
     """Shadow-mode schema-v2 pipeline pass (see this module's own
     docstring) - Method A only for now (raw edge, matching v1's real
     production threshold), reading whatever v2 capture_v2 has recorded
@@ -267,7 +293,7 @@ def run_pipeline_v2(conn) -> None:
         min_lead_time_s=SHADOW_FRESHNESS_LIMITS.min_lead_time_s, config=config,
         config_hash=content_hash(config), created_at=now,
     )
-    get_or_create_strategy_definition(conn, strategy)
+    strategy_version = get_or_create_strategy_definition(conn, strategy)
 
     entry_policy = ImmediateEntryPolicy(threshold=THRESHOLD)
     for comparison_site in ("swisslos.ch", "loro.ch"):
@@ -293,6 +319,8 @@ def run_pipeline_v2(conn) -> None:
         closings = process_cycle_closings(conn, results, now=now)
         if closings:
             log.info("closing consensus v2 (shadow) vs %s: %d snapshot(s) recorded", comparison_site, closings)
+
+    return strategy_version
 
 
 def main() -> RunStatus:
@@ -365,10 +393,17 @@ def main() -> RunStatus:
     except Exception:
         log.error("pipeline run failed:\n%s", traceback.format_exc())
 
+    strategy_version_v2 = None
     try:
-        run_pipeline_v2(conn)
+        strategy_version_v2 = run_pipeline_v2(conn)
     except Exception:
         log.error("pipeline v2 (shadow) run failed:\n%s", traceback.format_exc())
+
+    if args.full_handicaps and strategy_version_v2 is not None:
+        try:
+            run_daily_evaluation(conn, strategy_version_v2)
+        except Exception:
+            log.error("daily evaluation v2 (shadow) failed:\n%s", traceback.format_exc())
 
     try:
         force_resolve_stale(conn)
