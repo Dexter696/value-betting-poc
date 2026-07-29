@@ -210,7 +210,16 @@ class SwisslosClient:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=self.headless)
             try:
-                page = browser.new_page()
+                # timezone_id pins the rendered page to Swiss local time
+                # regardless of the host's own system timezone - without
+                # it, swisslos.ch's client-side-rendered kickoff time
+                # reflects whatever timezone the browser process itself
+                # runs in (UTC on GitHub Actions runners), and
+                # _parse_kickoff's Europe/Zurich conversion then
+                # double-converts an already-UTC-rendered time, landing
+                # 2 hours early (confirmed live 2026-07-29 against a real
+                # match's known kickoff time).
+                page = browser.new_context(timezone_id="Europe/Zurich").new_page()
                 return self._fetch_page(page, FOOTBALL_URL, sport)
             finally:
                 browser.close()
@@ -233,7 +242,16 @@ class SwisslosClient:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=self.headless)
             try:
-                page = browser.new_page()
+                # timezone_id pins the rendered page to Swiss local time
+                # regardless of the host's own system timezone - without
+                # it, swisslos.ch's client-side-rendered kickoff time
+                # reflects whatever timezone the browser process itself
+                # runs in (UTC on GitHub Actions runners), and
+                # _parse_kickoff's Europe/Zurich conversion then
+                # double-converts an already-UTC-rendered time, landing
+                # 2 hours early (confirmed live 2026-07-29 against a real
+                # match's known kickoff time).
+                page = browser.new_context(timezone_id="Europe/Zurich").new_page()
                 seen_ids: set[str] = set()
                 results: list[ScrapedRow] = []
                 for slug in SOCCER_COUNTRY_SLUGS:
@@ -268,7 +286,16 @@ class SwisslosClient:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=self.headless)
             try:
-                page = browser.new_page()
+                # timezone_id pins the rendered page to Swiss local time
+                # regardless of the host's own system timezone - without
+                # it, swisslos.ch's client-side-rendered kickoff time
+                # reflects whatever timezone the browser process itself
+                # runs in (UTC on GitHub Actions runners), and
+                # _parse_kickoff's Europe/Zurich conversion then
+                # double-converts an already-UTC-rendered time, landing
+                # 2 hours early (confirmed live 2026-07-29 against a real
+                # match's known kickoff time).
+                page = browser.new_context(timezone_id="Europe/Zurich").new_page()
                 results: list[ScrapedRow] = []
                 for row in rows:
                     if row.detail_url is None:
