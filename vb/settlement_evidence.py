@@ -28,11 +28,57 @@ from datetime import datetime
 from typing import Optional
 
 from .identity import content_hash_bytes, new_id
-from .models import MarketType, ResultEvidence, Selection, SettlementVersion
+from .models import (
+    CanonicalEvent,
+    EventMatchV2,
+    MarketType,
+    MatchOrientation,
+    MatchRole,
+    MatchTierV2,
+    ResultEvidence,
+    Selection,
+    SettlementVersion,
+)
 from .settlement import settle
-from .storage import current_settlement_version, save_result_evidence, save_settlement_version
+from .storage import current_settlement_version, save_canonical_event, save_event_match_v2, save_result_evidence, save_settlement_version
 
 ALGORITHM_VERSION = "settle-v1"  # bump whenever vb.settlement.settle()'s logic changes meaning
+BOOTSTRAP_MODEL_VERSION = "bootstrap-v1"
+
+
+def get_or_create_canonical_event(conn, event_version_id: str, sport: str, now: datetime) -> str:
+    """Bootstrap canonical event identity for a single source event.
+
+    NOT the full cross-site fusion vb.market_mapping's matching engine
+    will eventually provide once a real labeled negative dataset exists
+    to calibrate it against (see that module's own docstring on why
+    that's still deferred) - this just gives settlement evidence and
+    closing-consensus collection a real, stable id to reference NOW,
+    anchored on a single source event rather than a cross-site fusion.
+
+    If `event_version_id` is already linked to a canonical_event
+    (checked via event_match), reuses it. Otherwise creates a new
+    CanonicalEvent plus a single event_match row - score=1.0,
+    orientation=SAME, tier=AUTO, model_version="bootstrap-v1" - linking
+    them. A bootstrap "match" is trivially correct (it's the event
+    matched to itself), not a real cross-site pairing, so it's
+    intentionally distinguishable from a genuine vb.market_mapping
+    match by its model_version.
+    """
+    existing = conn.execute(
+        "SELECT canonical_event_id FROM event_match WHERE event_version_id = ? LIMIT 1", (event_version_id,)
+    ).fetchone()
+    if existing is not None:
+        return existing[0]
+
+    canonical_id = new_id()
+    save_canonical_event(conn, CanonicalEvent(id=canonical_id, sport=sport, created_at=now))
+    save_event_match_v2(conn, EventMatchV2(
+        id=new_id(), canonical_event_id=canonical_id, event_version_id=event_version_id,
+        role=MatchRole.BENCHMARK, orientation=MatchOrientation.SAME, score=1.0, score_components={},
+        model_version=BOOTSTRAP_MODEL_VERSION, tier=MatchTierV2.AUTO, decided_at=now,
+    ))
+    return canonical_id
 
 
 def archive_raw_response(payload: bytes) -> str:
@@ -82,6 +128,67 @@ def record_result_evidence(
         away_goals=away_goals, raw_payload_hash=raw_payload_hash, reviewer=reviewer, reviewed_at=reviewed_at,
     ))
     return evidence_id
+
+
+def record_settlement_for_event(
+    conn, benchmark_site: str, benchmark_event_id: str, provider: str, home_goals: int, away_goals: int, now: datetime,
+) -> int:
+    """The real live-wiring entry point: given a benchmark event's final
+    score, records ONE ResultEvidence and a SettlementVersion for every
+    DISTINCT (market_type, line, selection) leg ever tracked for this
+    event (via signal_episode.market_identity_id - see
+    vb.pipeline.market_key), regardless of whether a bet was actually
+    placed on it, matching the project's "capture everything" discipline.
+
+    Skips silently (returns 0) if this benchmark event was never
+    captured into schema v2 (no event_version row) - can't anchor a
+    canonical_event on something that doesn't exist yet, which is
+    expected for events that predate the v2 shadow pipeline going live.
+
+    Multiple comparison sites tracking the SAME real leg (e.g. HOME on
+    1X2 vs both swisslos.ch and loro.ch) produce different
+    market_identity_id strings (comparison_site is part of the key,
+    see market_key()) but the same real-world settlement outcome -
+    deduped here so record_settlement_version is only called once per
+    genuinely distinct leg, not once per comparison site.
+
+    Returns the number of settlement_version rows recorded (0 if the
+    event was never captured into v2, or was captured but no leg was
+    ever tracked for it).
+    """
+    from .pipeline import parse_market_identity  # local import: avoids a module-level cycle with vb.pipeline
+
+    row = conn.execute(
+        "SELECT id, sport FROM event_version WHERE site = ? AND event_id = ? ORDER BY valid_from DESC LIMIT 1",
+        (benchmark_site, benchmark_event_id),
+    ).fetchone()
+    if row is None:
+        return 0
+    event_version_id, sport = row
+
+    canonical_id = get_or_create_canonical_event(conn, event_version_id, sport=sport, now=now)
+    evidence_id = record_result_evidence(
+        conn, canonical_id, provider=provider, retrieved_at=now, status="final",
+        home_goals=home_goals, away_goals=away_goals,
+    )
+
+    market_identity_rows = conn.execute(
+        "SELECT DISTINCT market_identity_id FROM signal_episode WHERE market_identity_id LIKE ?",
+        (f"{benchmark_site}:{benchmark_event_id}:%",),
+    ).fetchall()
+
+    legs_settled: set[tuple] = set()
+    for (market_identity_id,) in market_identity_rows:
+        parsed = parse_market_identity(market_identity_id)
+        leg_key = (parsed.market_type, parsed.line, parsed.selection)
+        if leg_key in legs_settled:
+            continue
+        legs_settled.add(leg_key)
+        record_settlement_version(
+            conn, canonical_id, parsed.market_type, parsed.line, parsed.selection, evidence_id,
+            home_goals=home_goals, away_goals=away_goals, created_at=now,
+        )
+    return len(legs_settled)
 
 
 def record_settlement_version(

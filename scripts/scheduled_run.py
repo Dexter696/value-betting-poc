@@ -57,6 +57,7 @@ from vb.identity import content_hash, new_id
 from vb.models import RunStatus, StrategyDefinition
 from vb.opportunity import THRESHOLD
 from vb.pipeline import run_cycle, run_cycle_v2
+from vb.settlement_evidence import record_settlement_for_event
 from vb.strategy import ImmediateEntryPolicy
 from vb.sources.loro import LoroClient
 from vb.sources.pinnacle import PinnacleClient
@@ -219,6 +220,21 @@ def auto_settle(conn) -> None:
         home_goals, away_goals = result
         record_match_result(conn, "pinnacle.com", event.event_id, home_goals, away_goals, source="auto:espn")
         settled_count += 1
+
+        # F-17/Phase 6: also record versioned settlement evidence for
+        # every v2 leg ever tracked on this event - best-effort, wrapped
+        # so a v2-side bug can never make v1's own (already-succeeded)
+        # settlement look like it failed.
+        try:
+            now = datetime.now(timezone.utc)
+            legs = record_settlement_for_event(
+                conn, "pinnacle.com", event.event_id, provider="espn",
+                home_goals=home_goals, away_goals=away_goals, now=now,
+            )
+            if legs:
+                log.info("settlement evidence v2: %d leg(s) settled for event %s", legs, event.event_id)
+        except Exception:
+            log.error("settlement evidence v2 failed for event %s:\n%s", event.event_id, traceback.format_exc())
     log.info("auto-settle: %d/%d unsettled match(es) resolved via ESPN", settled_count, len(unsettled))
 
 
