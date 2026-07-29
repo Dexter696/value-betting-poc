@@ -1,4 +1,7 @@
-from vb.sources.results import MIN_TEAM_SIMILARITY, _espn_slug_for, _team_similarity
+from datetime import datetime, timezone
+
+from vb.sources import results as results_module
+from vb.sources.results import MIN_TEAM_SIMILARITY, _espn_slug_for, _team_similarity, find_result
 
 
 def test_slug_for_top_flight_league():
@@ -75,6 +78,74 @@ def test_slug_for_romania_liga_1_with_arabic_numeral():
 
 def test_slug_for_sweden_superettan_second_tier():
     assert _espn_slug_for("Sweden - Superettan") == "swe.2"
+
+
+class _FakeResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+def _espn_event(home_name, away_name, home_score, away_score, status_name):
+    return {
+        "competitions": [{
+            "status": {"type": {"completed": True, "name": status_name}},
+            "competitors": [
+                {"homeAway": "home", "team": {"displayName": home_name}, "score": str(home_score)},
+                {"homeAway": "away", "team": {"displayName": away_name}, "score": str(away_score)},
+            ],
+        }]
+    }
+
+
+def test_find_result_accepts_a_match_decided_in_extra_time(monkeypatch):
+    # Real gap found live 2026-07-29: STATUS_FINAL_AET has completed=True
+    # and a real final score, but the old code required the status name
+    # to be EXACTLY "STATUS_FULL_TIME" - a knockout match that went to
+    # extra time sat unsettled forever despite ESPN having the result.
+    payload = {"events": [_espn_event("Dinamo Zagreb", "FC Thun", 3, 2, "STATUS_FINAL_AET")]}
+    monkeypatch.setattr(results_module.requests, "get", lambda *a, **k: _FakeResponse(payload))
+
+    result = find_result(
+        "UEFA - Champions League Qualifiers", "Dinamo Zagreb", "Thun",
+        datetime(2026, 7, 28, 18, 0, tzinfo=timezone.utc),
+    )
+    assert result == (3, 2)
+
+
+def test_find_result_accepts_a_match_decided_on_penalties_using_the_pre_shootout_score(monkeypatch):
+    # STATUS_FINAL_PEN is the other status the old exact-match check
+    # missed. ESPN's own `score` field for a penalty-shootout match
+    # already reflects the pre-shootout (90+extra-time) goal count -
+    # the correct value for standard 1X2/AH/Totals settlement, where
+    # penalties only decide who advances, not the match result.
+    # identical team names on both sides - isolates the status-name
+    # behavior under test from the separate team-similarity concern
+    # already covered by other tests in this file
+    payload = {"events": [_espn_event("Celje", "Egnatia", 2, 2, "STATUS_FINAL_PEN")]}
+    monkeypatch.setattr(results_module.requests, "get", lambda *a, **k: _FakeResponse(payload))
+
+    result = find_result(
+        "UEFA - Champions League Qualifiers", "Celje", "Egnatia",
+        datetime(2026, 7, 28, 18, 15, tzinfo=timezone.utc),
+    )
+    assert result == (2, 2)
+
+
+def test_find_result_still_rejects_a_live_or_scheduled_match(monkeypatch):
+    payload = {"events": [_espn_event("Dinamo Zagreb", "FC Thun", 1, 0, "STATUS_IN_PROGRESS")]}
+    monkeypatch.setattr(results_module.requests, "get", lambda *a, **k: _FakeResponse(payload))
+
+    result = find_result(
+        "UEFA - Champions League Qualifiers", "Dinamo Zagreb", "Thun",
+        datetime(2026, 7, 28, 18, 0, tzinfo=timezone.utc),
+    )
+    assert result is None
 
 
 def test_team_similarity_matches_short_pinnacle_name_via_new_aliases():

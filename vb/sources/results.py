@@ -42,6 +42,19 @@ from ..normalize import normalize_team_name
 BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 MIN_TEAM_SIMILARITY = 88.0  # rapidfuzz 0-100 scale; strict on purpose, see module docstring
 
+# A cup/qualifier match ESPN marks complete can carry a status name
+# other than the plain "STATUS_FULL_TIME" this used to require
+# exactly - STATUS_FINAL_AET (extra time) and STATUS_FINAL_PEN
+# (penalty shootout) were both confirmed live 2026-07-29 to have
+# completed=True and a real final score, but were silently excluded
+# by the old exact-match check, sitting unsettled forever. Confirmed
+# ESPN's own `score` field for a STATUS_FINAL_PEN match already
+# reflects the pre-shootout (90+extra-time) goal count - the correct
+# value for standard 1X2/Asian-Handicap/Totals settlement, where a
+# penalty shootout only decides who advances, not the match result -
+# so no separate shootout-score handling is needed for either status.
+_COMPLETED_STATUS_NAMES = {"STATUS_FULL_TIME", "STATUS_FINAL_AET", "STATUS_FINAL_PEN"}
+
 # Pinnacle's country name (lowercased) -> ESPN's soccer country code.
 # Confirmed live against ESPN's league directory - NOT exhaustive, only
 # what's actually been seen/tested. Extend as new countries show up in
@@ -229,7 +242,7 @@ def find_result(competition: str, home_team: str, away_team: str, kickoff_utc: d
     for ev in events:
         comp = (ev.get("competitions") or [{}])[0]
         status = comp.get("status") or {}
-        if not status.get("type", {}).get("completed") or status.get("type", {}).get("name") != "STATUS_FULL_TIME":
+        if not status.get("type", {}).get("completed") or status.get("type", {}).get("name") not in _COMPLETED_STATUS_NAMES:
             continue  # only settle from a fully finished match - not live/postponed/abandoned
 
         competitors = comp.get("competitors") or []
