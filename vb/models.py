@@ -401,6 +401,34 @@ class EvaluationRun:
 
 
 @dataclass(frozen=True)
+class ExperimentProtocol:
+    """An immutable, pre-registered experiment protocol (audit Phase 7,
+    2026-07-25): "before the first decision, save an immutable
+    protocol" so a confirmatory run's rules are locked in before any
+    result could influence them. A later change never edits this row -
+    vb.protocol.freeze_protocol() inserts a new row and marks the
+    previous one for the same `name` `superseded_by` this one, mirroring
+    SettlementVersion's supersedes_id pattern - old decisions/episodes
+    tied to the superseded protocol's strategy versions are never
+    retroactively treated as belonging to the new one."""
+
+    id: str
+    name: str
+    frozen_at: datetime
+    start_rule: str
+    end_rule: str  # the pre-committed sample/stopping rule
+    strategy_version_ids: tuple[str, ...]  # StrategyDefinition ids active under this protocol
+    source_list: tuple[str, ...]
+    fair_model: str
+    execution_haircut_s: float
+    exposure_limits: dict
+    primary_metric: str
+    secondary_metrics: tuple[str, ...]
+    incident_policy: str
+    superseded_by: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class ClosingSnapshot:
     """A market's consensus closing price - the reference point CLV
     (closing-line value, vb.closing) is measured against. Populated by

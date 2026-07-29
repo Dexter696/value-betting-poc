@@ -424,3 +424,30 @@ CREATE TABLE IF NOT EXISTS evaluation_run (
     created_at        TEXT NOT NULL,
     metrics_json      TEXT NOT NULL
 );
+
+-- An immutable, pre-registered experiment protocol (Phase 7): "before
+-- the first decision, save an immutable protocol" listing everything
+-- that must be locked in before a confirmatory (non-shadow) run so
+-- nothing about the rules can drift in response to early results. A
+-- later change never edits this row - vb.protocol.freeze_protocol()
+-- inserts a new row and marks the previous one (same `name`)
+-- `superseded_by`, mirroring settlement_version's supersedes_id
+-- pattern. Schema only for now - see vb/protocol.py's own docstring
+-- for why no actual experiment has been frozen yet.
+CREATE TABLE IF NOT EXISTS experiment_protocol (
+    id                          TEXT PRIMARY KEY,
+    name                        TEXT NOT NULL,
+    frozen_at                   TEXT NOT NULL,
+    start_rule                  TEXT NOT NULL,
+    end_rule                    TEXT NOT NULL,
+    strategy_version_ids_json   TEXT NOT NULL,
+    source_list_json            TEXT NOT NULL,
+    fair_model                  TEXT NOT NULL,
+    execution_haircut_s         REAL NOT NULL,
+    exposure_limits_json        TEXT NOT NULL,
+    primary_metric              TEXT NOT NULL,
+    secondary_metrics_json      TEXT NOT NULL,
+    incident_policy             TEXT NOT NULL,
+    superseded_by               TEXT REFERENCES experiment_protocol(id)
+);
+CREATE INDEX IF NOT EXISTS idx_experiment_protocol_name ON experiment_protocol(name, superseded_by);

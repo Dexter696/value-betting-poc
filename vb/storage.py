@@ -23,6 +23,7 @@ from .models import (
     CaptureRun,
     ClosingSnapshot,
     EvaluationRun,
+    ExperimentProtocol,
     ResultEvidence,
     SettlementVersion,
     EpisodeEndReason,
@@ -1172,6 +1173,81 @@ def save_evaluation_run(conn: sqlite3.Connection, run: EvaluationRun) -> str:
     )
     conn.commit()
     return run.id
+
+
+def save_experiment_protocol(conn: sqlite3.Connection, protocol: ExperimentProtocol) -> str:
+    """Insert-only (Phase 7, F-XX pre-registration) - see vb.protocol
+    module docstring. `superseded_by` starts NULL; marking an older
+    protocol superseded is the one explicit, guarded UPDATE
+    mark_experiment_protocol_superseded() performs, never a rewrite of
+    this row itself."""
+    conn.execute(
+        """
+        INSERT INTO experiment_protocol (
+            id, name, frozen_at, start_rule, end_rule, strategy_version_ids_json, source_list_json,
+            fair_model, execution_haircut_s, exposure_limits_json, primary_metric, secondary_metrics_json,
+            incident_policy, superseded_by
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (protocol.id, protocol.name, _to_iso(protocol.frozen_at), protocol.start_rule, protocol.end_rule,
+         json.dumps(list(protocol.strategy_version_ids)), json.dumps(list(protocol.source_list)),
+         protocol.fair_model, protocol.execution_haircut_s, canonical_json(protocol.exposure_limits),
+         protocol.primary_metric, json.dumps(list(protocol.secondary_metrics)), protocol.incident_policy,
+         protocol.superseded_by),
+    )
+    conn.commit()
+    return protocol.id
+
+
+def mark_experiment_protocol_superseded(conn: sqlite3.Connection, protocol_id: str, superseded_by: str) -> None:
+    """The one guarded state-transition UPDATE this table allows - sets
+    `superseded_by` on a row that doesn't have one yet. Never touches
+    any other column, and is a no-op (not an error) if the row was
+    already superseded by something else, so a caller can't
+    accidentally reassign an already-closed cohort's successor."""
+    conn.execute(
+        "UPDATE experiment_protocol SET superseded_by = ? WHERE id = ? AND superseded_by IS NULL",
+        (superseded_by, protocol_id),
+    )
+    conn.commit()
+
+
+def _row_to_experiment_protocol(row) -> ExperimentProtocol:
+    return ExperimentProtocol(
+        id=row[0], name=row[1], frozen_at=_from_iso(row[2]), start_rule=row[3], end_rule=row[4],
+        strategy_version_ids=tuple(json.loads(row[5])), source_list=tuple(json.loads(row[6])),
+        fair_model=row[7], execution_haircut_s=row[8], exposure_limits=json.loads(row[9]),
+        primary_metric=row[10], secondary_metrics=tuple(json.loads(row[11])), incident_policy=row[12],
+        superseded_by=row[13],
+    )
+
+
+_EXPERIMENT_PROTOCOL_COLUMNS = (
+    "id, name, frozen_at, start_rule, end_rule, strategy_version_ids_json, source_list_json, "
+    "fair_model, execution_haircut_s, exposure_limits_json, primary_metric, secondary_metrics_json, "
+    "incident_policy, superseded_by"
+)
+
+
+def current_experiment_protocol(conn: sqlite3.Connection, name: str) -> Optional[ExperimentProtocol]:
+    """The active (non-superseded) protocol for `name`, or None if none
+    has ever been frozen. At most one row for a given `name` should
+    ever have superseded_by IS NULL at a time - freeze_protocol() is
+    responsible for superseding the previous one in the same call that
+    creates a new one."""
+    row = conn.execute(
+        f"SELECT {_EXPERIMENT_PROTOCOL_COLUMNS} FROM experiment_protocol WHERE name = ? AND superseded_by IS NULL "
+        "ORDER BY frozen_at DESC LIMIT 1",
+        (name,),
+    ).fetchone()
+    return _row_to_experiment_protocol(row) if row is not None else None
+
+
+def get_experiment_protocol(conn: sqlite3.Connection, protocol_id: str) -> Optional[ExperimentProtocol]:
+    row = conn.execute(
+        f"SELECT {_EXPERIMENT_PROTOCOL_COLUMNS} FROM experiment_protocol WHERE id = ?", (protocol_id,)
+    ).fetchone()
+    return _row_to_experiment_protocol(row) if row is not None else None
 
 
 def save_closing_snapshot(conn: sqlite3.Connection, snapshot: ClosingSnapshot) -> str:
