@@ -257,8 +257,9 @@ def merge(source_path: str, dest_path: str) -> dict:
             ON CONFLICT(site, event_id) DO UPDATE SET
                 sport = excluded.sport, competition = excluded.competition, kickoff_utc = excluded.kickoff_utc,
                 raw_home_team = excluded.raw_home_team, raw_away_team = excluded.raw_away_team
-            WHERE main.raw_event.competition != excluded.competition OR main.raw_event.kickoff_utc != excluded.kickoff_utc
-               OR main.raw_event.raw_home_team != excluded.raw_home_team OR main.raw_event.raw_away_team != excluded.raw_away_team
+            WHERE main.raw_event.sport != excluded.sport OR main.raw_event.competition != excluded.competition
+               OR main.raw_event.kickoff_utc != excluded.kickoff_utc OR main.raw_event.raw_home_team != excluded.raw_home_team
+               OR main.raw_event.raw_away_team != excluded.raw_away_team
         """, row)
         raw_event_touched += cur.rowcount
     counts["raw_event"] = raw_event_touched
@@ -295,7 +296,7 @@ def merge(source_path: str, dest_path: str) -> dict:
     """).fetchall():
         (bench_site, bench_id, comp_site, comp_id, score, reasons_json, first_seen_at, last_seen_at, status, reviewed_at) = row
         existing = dest.execute("""
-            SELECT status, last_seen_at FROM main.event_match_review
+            SELECT status FROM main.event_match_review
             WHERE benchmark_site = ? AND benchmark_event_id = ? AND comparison_site = ? AND comparison_event_id = ?
         """, (bench_site, bench_id, comp_site, comp_id)).fetchone()
 
@@ -308,25 +309,34 @@ def merge(source_path: str, dest_path: str) -> dict:
             event_match_review_touched += 1
             continue
 
-        dest_status, dest_last_seen_at = existing
+        (dest_status,) = existing
         if dest_status == "pending" and status != "pending":
             # source has a real decision dest lacks - take it, along with
-            # whichever last_seen_at is actually later (freshest sighting).
+            # whichever last_seen_at is actually later (freshest sighting)
+            # and whichever first_seen_at is actually earlier (true
+            # earliest sighting - omitted from the first version of this
+            # fix, found by self-review: same lossy-merge failure mode
+            # F-11 exists to close, just on a different column).
             dest.execute("""
                 UPDATE main.event_match_review
-                SET score = ?, reasons_json = ?, last_seen_at = MAX(last_seen_at, ?), status = ?, reviewed_at = ?
+                SET score = ?, reasons_json = ?, first_seen_at = MIN(first_seen_at, ?),
+                    last_seen_at = MAX(last_seen_at, ?), status = ?, reviewed_at = ?
                 WHERE benchmark_site = ? AND benchmark_event_id = ? AND comparison_site = ? AND comparison_event_id = ?
-            """, (score, reasons_json, last_seen_at, status, reviewed_at, bench_site, bench_id, comp_site, comp_id))
+            """, (score, reasons_json, first_seen_at, last_seen_at, status, reviewed_at, bench_site, bench_id, comp_site, comp_id))
             event_match_review_touched += 1
         elif dest_status != "pending":
             pass  # dest already has a decision (own or a prior merge's) - never overwritten by source
-        elif last_seen_at > dest_last_seen_at:
-            # both still pending - just record that it was seen again more recently
-            dest.execute("""
-                UPDATE main.event_match_review SET last_seen_at = ?
+        else:
+            # both still pending - reconcile first_seen_at (earliest wins)
+            # and last_seen_at (latest wins) independently; only counted
+            # as touched if either side's value actually changes dest's.
+            cur = dest.execute("""
+                UPDATE main.event_match_review
+                SET first_seen_at = MIN(first_seen_at, ?), last_seen_at = MAX(last_seen_at, ?)
                 WHERE benchmark_site = ? AND benchmark_event_id = ? AND comparison_site = ? AND comparison_event_id = ?
-            """, (last_seen_at, bench_site, bench_id, comp_site, comp_id))
-            event_match_review_touched += 1
+                  AND (first_seen_at > ? OR last_seen_at < ?)
+            """, (first_seen_at, last_seen_at, bench_site, bench_id, comp_site, comp_id, first_seen_at, last_seen_at))
+            event_match_review_touched += cur.rowcount
     counts["event_match_review"] = event_match_review_touched
 
     # NOT a plain INSERT OR IGNORE: SQLite's UNIQUE constraint never

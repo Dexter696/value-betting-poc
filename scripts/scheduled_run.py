@@ -55,7 +55,7 @@ from vb.decision_runner import process_cycle_decisions
 from vb.evaluation_runner import run_evaluation
 from vb.exposure import ExposureLimits
 from vb.freshness import FreshnessLimits
-from vb.identity import content_hash, content_hash_bytes, new_id
+from vb.identity import content_hash, content_hash_file, new_id
 from vb.models import RunStatus, StrategyDefinition
 from vb.opportunity import THRESHOLD
 from vb.pipeline import run_cycle, run_cycle_v2
@@ -255,7 +255,7 @@ def run_daily_evaluation(conn, strategy_version: str) -> None:
     """
     now = datetime.now(timezone.utc)
     config = {"signal_model": "raw-v1", "threshold": THRESHOLD, "shadow_mode": True}
-    db_snapshot_hash = content_hash_bytes(DB_PATH.read_bytes())
+    db_snapshot_hash = content_hash_file(DB_PATH)
     report = run_evaluation(
         conn, strategy_version, code_sha=_git_sha(), config=config,
         db_snapshot_hash=db_snapshot_hash, data_cutoff=now, now=now,
@@ -323,16 +323,22 @@ def run_pipeline_v2(conn) -> str:
     return strategy_version
 
 
-def main() -> RunStatus:
-    """Returns the cycle's capture_run status. F-16: every stage below is
-    deliberately isolated in its own try/except so one failing site or
-    pipeline step never aborts the rest of the cycle - but that same
-    isolation previously meant NOTHING ever propagated failure back to
-    the process exit code, so a cycle where every single capture site
-    failed still looked green in GitHub Actions. The caller (__main__)
-    now exits non-zero on a FAILED capture_run - a total capture
-    failure is a real signal worth a red CI check, unlike PARTIAL
-    (some sites failed, expected/tolerable degradation)."""
+def main() -> tuple[RunStatus, bool]:
+    """Returns (the cycle's capture_run status, whether a core pipeline
+    pass crashed entirely). F-16: every stage below is deliberately
+    isolated in its own try/except so one failing site or pipeline step
+    never aborts the rest of the cycle - but that same isolation
+    previously meant NOTHING ever propagated failure back to the
+    process exit code, so a cycle where every single capture site
+    failed, OR where run_pipeline/run_pipeline_v2 raised entirely
+    despite capture succeeding (found by self-review, 2026-07-29 - the
+    first version of this fix only looked at capture_run_status),
+    still looked green in GitHub Actions. The caller (__main__) now
+    exits non-zero on either condition - a total capture failure or a
+    core pipeline crash is a real signal worth a red CI check, unlike
+    PARTIAL capture (some sites failed, expected/tolerable degradation)
+    or an isolated auto-settle/pruning failure (already logged, lower
+    stakes, not worth failing the whole cycle over)."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--full-swisslos", action="store_true",
@@ -388,22 +394,28 @@ def main() -> RunStatus:
     except Exception:
         log.error("v2 end_capture_run failed:\n%s", traceback.format_exc())
 
+    pipeline_crashed = False
     try:
         run_pipeline(conn)
     except Exception:
         log.error("pipeline run failed:\n%s", traceback.format_exc())
+        pipeline_crashed = True
 
     strategy_version_v2 = None
     try:
         strategy_version_v2 = run_pipeline_v2(conn)
     except Exception:
         log.error("pipeline v2 (shadow) run failed:\n%s", traceback.format_exc())
+        pipeline_crashed = True
 
-    if args.full_handicaps and strategy_version_v2 is not None:
-        try:
-            run_daily_evaluation(conn, strategy_version_v2)
-        except Exception:
-            log.error("daily evaluation v2 (shadow) failed:\n%s", traceback.format_exc())
+    if args.full_handicaps:
+        if strategy_version_v2 is None:
+            log.error("daily evaluation v2 (shadow) skipped: pipeline v2 run failed above, no strategy_version to evaluate")
+        else:
+            try:
+                run_daily_evaluation(conn, strategy_version_v2)
+            except Exception:
+                log.error("daily evaluation v2 (shadow) failed:\n%s", traceback.format_exc())
 
     try:
         force_resolve_stale(conn)
@@ -425,10 +437,10 @@ def main() -> RunStatus:
         log.error("pruning failed:\n%s", traceback.format_exc())
 
     log.info("=== cycle end ===")
-    return capture_run_status
+    return capture_run_status, pipeline_crashed
 
 
 if __name__ == "__main__":
-    status = main()
-    if status == RunStatus.FAILED:
+    status, pipeline_crashed = main()
+    if status == RunStatus.FAILED or pipeline_crashed:
         sys.exit(1)

@@ -20,6 +20,7 @@ import hashlib
 import json
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 
 def new_id() -> str:
@@ -60,3 +61,17 @@ def content_hash_bytes(data: bytes) -> str:
     where the payload isn't JSON-serializable data but the literal HTTP
     response body."""
     return hashlib.sha256(data).hexdigest()
+
+
+def content_hash_file(path: str | Path, chunk_size: int = 4 * 1024 * 1024) -> str:
+    """SHA-256 of a file's contents, read in chunks rather than loaded
+    whole into memory - for hashing large files like the capture
+    database (evaluation_run.db_snapshot_hash), which is already in the
+    hundreds of MB and growing every cycle (found by self-review,
+    2026-07-29: content_hash_bytes(path.read_bytes()) was doing a full
+    in-memory read once a day for exactly this)."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

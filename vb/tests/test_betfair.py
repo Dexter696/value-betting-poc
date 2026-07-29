@@ -140,7 +140,7 @@ def test_fetch_soccer_match_odds_skips_event_without_v_separator(monkeypatch):
     assert client.fetch_soccer_match_odds() == []
 
 
-def test_call_raises_on_api_error(monkeypatch):
+def test_call_raises_on_a_non_session_api_error(monkeypatch):
     client = BetfairClient(app_key="k", username="u", password="p")
     client._session_token = "sess-123"
 
@@ -149,8 +149,82 @@ def test_call_raises_on_api_error(monkeypatch):
             pass
 
         def json(self):
-            return {"error": {"errorCode": "INVALID_SESSION_INFORMATION"}}
+            return {"error": {"errorCode": "INVALID_INPUT_DATA"}}
 
     monkeypatch.setattr("vb.sources.betfair.requests.post", lambda *a, **k: FakeResp())
+    with pytest.raises(BetfairAuthError):
+        client.list_match_odds_catalogue()
+
+
+def test_call_retries_once_on_expired_session_and_succeeds(monkeypatch):
+    # Regression found by self-review (2026-07-29): a session expiring
+    # mid-scrape (e.g. between chunked listMarketBook calls) used to
+    # abort the whole scrape instead of re-authenticating once.
+    client = BetfairClient(app_key="k", username="u", password="p")
+    client._session_token = "stale-token"
+    calls = {"n": 0}
+
+    class SessionExpiredResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"error": {"errorCode": "INVALID_SESSION_INFORMATION"}}
+
+    class LoginSuccessResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"status": "SUCCESS", "token": "fresh-token"}
+
+    class CatalogueSuccessResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"result": [CATALOGUE_ENTRY]}
+
+    def fake_post(url, *a, **k):
+        calls["n"] += 1
+        if url == "https://identitysso.betfair.com/api/login":
+            return LoginSuccessResp()
+        if calls["n"] == 1:
+            return SessionExpiredResp()
+        return CatalogueSuccessResp()
+
+    monkeypatch.setattr("vb.sources.betfair.requests.post", fake_post)
+
+    result = client.list_match_odds_catalogue()
+
+    assert result == [CATALOGUE_ENTRY]
+    assert client._session_token == "fresh-token"
+
+
+def test_call_raises_if_session_error_persists_after_retry(monkeypatch):
+    client = BetfairClient(app_key="k", username="u", password="p")
+    client._session_token = "stale-token"
+
+    class SessionExpiredResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"error": {"errorCode": "INVALID_SESSION_INFORMATION"}}
+
+    class LoginSuccessResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"status": "SUCCESS", "token": "fresh-token"}
+
+    def fake_post(url, *a, **k):
+        if url == "https://identitysso.betfair.com/api/login":
+            return LoginSuccessResp()
+        return SessionExpiredResp()  # keeps failing even after a fresh login
+
+    monkeypatch.setattr("vb.sources.betfair.requests.post", fake_post)
+
     with pytest.raises(BetfairAuthError):
         client.list_match_odds_catalogue()

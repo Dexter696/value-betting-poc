@@ -116,8 +116,17 @@ jobs:
       # last resort). Release assets aren't subject to cache eviction at
       # all, so this is meaningfully more durable than the cache, not
       # just a second copy of the same risk.
+      #
+      # always() (2026-07-29, found by self-review after F-16): the
+      # "Run capture + pipeline cycle" step can now exit non-zero on a
+      # total capture failure (F-16) - without always(), GitHub Actions'
+      # default behavior skips every later step once one fails, which
+      # would silently defeat this backup on exactly the day the
+      # pipeline is unhealthy and a backup matters most. The job as a
+      # whole still reports failed (that's the whole point of F-16);
+      # always() only keeps THIS step itself from being skipped.
       - name: Backup database to db-sync release
-        if: github.event.schedule == '13 3 * * *' && (github.event.inputs.db_sync == 'none' || github.event.inputs.db_sync == '')
+        if: always() && github.event.schedule == '13 3 * * *' && (github.event.inputs.db_sync == 'none' || github.event.inputs.db_sync == '')
         run: gh release upload db-sync data/vb.sqlite --repo "${{ github.repository }}" --clobber
         env:
           GH_TOKEN: ${{ github.token }}
@@ -131,16 +140,19 @@ jobs:
       # straight to Pages hosting without ever needing a git commit.
       # Runs on import too (not just the normal cycle) so a DB sync
       # immediately republishes the dashboard with the reconciled data;
-      # skipped on export since nothing changed there.
+      # skipped on export since nothing changed there. always() for the
+      # same F-16 reason as the backup step above - a capture failure
+      # must not also silently stop the dashboard from reflecting
+      # whatever state the DB is actually in.
       - name: Build dashboard
         id: build-dashboard
-        if: github.event.inputs.db_sync != 'export'
+        if: always() && github.event.inputs.db_sync != 'export'
         run: |
           mkdir -p public
           python scripts/build_dashboard.py public/index.html
 
       - name: Upload dashboard artifact
-        if: github.event.inputs.db_sync != 'export'
+        if: always() && github.event.inputs.db_sync != 'export' && steps.build-dashboard.outcome == 'success'
         uses: actions/upload-pages-artifact@v3
         with:
           path: public

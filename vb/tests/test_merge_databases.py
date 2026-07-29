@@ -61,9 +61,37 @@ def test_raw_event_identical_rows_are_not_reported_as_touched(tmp_path):
     assert counts["raw_event"] == 0
 
 
+def test_raw_event_conflict_on_sport_alone_still_updates(tmp_path):
+    # Regression found by self-review (2026-07-29): the conflict WHERE
+    # clause originally omitted `sport` even though it's in the SET
+    # list - a source row differing ONLY in sport would evaluate the
+    # WHERE as false and silently keep dest's stale value.
+    source_conn = init_db(tmp_path / "source.sqlite")
+    dest_conn = init_db(tmp_path / "dest.sqlite")
+
+    dest_conn.execute(
+        "INSERT INTO raw_event VALUES ('pinnacle.com', 'e1', 'soccer', 'Premier League', '2026-08-01T15:00:00+00:00', 'A', 'B')"
+    )
+    dest_conn.commit()
+    dest_conn.close()
+
+    source_conn.execute(
+        "INSERT INTO raw_event VALUES ('pinnacle.com', 'e1', 'football', 'Premier League', '2026-08-01T15:00:00+00:00', 'A', 'B')"
+    )
+    source_conn.commit()
+    source_conn.close()
+
+    counts = merge(str(tmp_path / "source.sqlite"), str(tmp_path / "dest.sqlite"))
+    assert counts["raw_event"] == 1
+
+    check_conn = init_db(tmp_path / "dest.sqlite")
+    row = _raw_event_row(check_conn, "pinnacle.com", "e1")
+    assert row[0] == "football"  # source's corrected sport won
+
+
 def _review_row(conn, bench_id):
     return conn.execute(
-        "SELECT status, reviewed_at, last_seen_at FROM event_match_review "
+        "SELECT status, reviewed_at, last_seen_at, first_seen_at FROM event_match_review "
         "WHERE benchmark_site = 'pinnacle.com' AND benchmark_event_id = ?",
         (bench_id,),
     ).fetchone()
@@ -94,7 +122,7 @@ def test_event_match_review_reviewed_source_wins_over_pending_dest(tmp_path):
     merge(str(tmp_path / "source.sqlite"), str(tmp_path / "dest.sqlite"))
 
     check_conn = init_db(tmp_path / "dest.sqlite")
-    status, reviewed_at, last_seen_at = _review_row(check_conn, "e1")
+    status, reviewed_at, last_seen_at, _ = _review_row(check_conn, "e1")
     assert status == "approved"
     assert reviewed_at == "2026-08-01T11:05:00+00:00"
 
@@ -111,7 +139,7 @@ def test_event_match_review_dest_reviewed_decision_never_overwritten_by_pending_
     merge(str(tmp_path / "source.sqlite"), str(tmp_path / "dest.sqlite"))
 
     check_conn = init_db(tmp_path / "dest.sqlite")
-    status, reviewed_at, _ = _review_row(check_conn, "e1")
+    status, reviewed_at, _, _ = _review_row(check_conn, "e1")
     assert status == "rejected"
     assert reviewed_at == "2026-08-01T10:30:00+00:00"
 
@@ -128,6 +156,50 @@ def test_event_match_review_both_pending_takes_later_last_seen_at(tmp_path):
     merge(str(tmp_path / "source.sqlite"), str(tmp_path / "dest.sqlite"))
 
     check_conn = init_db(tmp_path / "dest.sqlite")
-    status, _, last_seen_at = _review_row(check_conn, "e1")
+    status, _, last_seen_at, _ = _review_row(check_conn, "e1")
     assert status == "pending"
     assert last_seen_at == "2026-08-01T14:00:00+00:00"
+
+
+def test_event_match_review_reconciles_first_seen_at_to_the_earliest_side(tmp_path):
+    # Regression found by self-review (2026-07-29): the first version of
+    # this fix reconciled last_seen_at/status/reviewed_at but silently
+    # dropped source's first_seen_at even when it was genuinely earlier
+    # - the same lossy-merge failure mode F-11 exists to close, just on
+    # a different column.
+    dest_conn = init_db(tmp_path / "dest.sqlite")
+    _insert_review(dest_conn, "e1", "pending", "2026-08-01T10:00:00+00:00", "2026-08-01T10:00:00+00:00")
+    dest_conn.close()
+
+    source_conn = init_db(tmp_path / "source.sqlite")
+    # source saw it earlier AND later reviewed it
+    _insert_review(source_conn, "e1", "approved", "2026-08-01T09:00:00+00:00", "2026-08-01T11:00:00+00:00", reviewed_at="2026-08-01T11:05:00+00:00")
+    source_conn.close()
+
+    merge(str(tmp_path / "source.sqlite"), str(tmp_path / "dest.sqlite"))
+
+    check_conn = init_db(tmp_path / "dest.sqlite")
+    status, _, _, first_seen_at = _review_row(check_conn, "e1")
+    assert status == "approved"
+    assert first_seen_at == "2026-08-01T09:00:00+00:00"  # source's earlier sighting won, not dest's later one
+
+
+def test_event_match_review_both_pending_reconciles_first_seen_at_too(tmp_path):
+    dest_conn = init_db(tmp_path / "dest.sqlite")
+    _insert_review(dest_conn, "e1", "pending", "2026-08-01T10:00:00+00:00", "2026-08-01T10:00:00+00:00")
+    dest_conn.close()
+
+    source_conn = init_db(tmp_path / "source.sqlite")
+    # earlier first_seen_at but NOT a later last_seen_at - the old
+    # both-pending branch only fired the UPDATE when last_seen_at was
+    # later, which would have skipped this reconciliation entirely.
+    _insert_review(source_conn, "e1", "pending", "2026-08-01T08:00:00+00:00", "2026-08-01T09:00:00+00:00")
+    source_conn.close()
+
+    merge(str(tmp_path / "source.sqlite"), str(tmp_path / "dest.sqlite"))
+
+    check_conn = init_db(tmp_path / "dest.sqlite")
+    status, _, last_seen_at, first_seen_at = _review_row(check_conn, "e1")
+    assert status == "pending"
+    assert first_seen_at == "2026-08-01T08:00:00+00:00"
+    assert last_seen_at == "2026-08-01T10:00:00+00:00"  # dest's later last_seen_at correctly preserved

@@ -260,26 +260,67 @@ def test_event_started_close_floors_ended_at_at_kickoff_even_if_process_now_is_e
 def test_event_started_with_no_new_snapshot_does_not_duplicate_observation(tmp_path):
     # F-03: "must not add a new market observation if a new snapshot
     # wasn't actually fetched" - closing on stale, already-recorded odds
-    # must not fabricate a second observation row at the same timestamp.
+    # must not fabricate a second observation row. In the real pipeline,
+    # "no new snapshot" means load_latest_market_snapshots_v2 keeps
+    # returning the SAME already-recorded snapshot row (the site simply
+    # stopped updating, e.g. Pinnacle drops a matchup after kickoff) -
+    # so this reuses the opening reading's exact benchmark/comparison
+    # snapshot ids, not fresh ones, to match that real shape.
     conn = _db(tmp_path)
     strategy_id = _strategy_id(conn)
     tracker = EpisodeTracker(conn, strategy_id, MARKET_IDENTITY, threshold=0.03)
 
-    open_result = tracker.ingest(_reading(conn, 0, 0.05))
+    opening_reading = _reading(conn, 0, 0.05)
+    open_result = tracker.ingest(opening_reading)
     obs_before = conn.execute(
         "SELECT COUNT(*) FROM signal_observation WHERE episode_id = ?", (open_result.episode_id,)
     ).fetchone()[0]
 
     kickoff = T0 + timedelta(hours=3)
     process_now = kickoff + timedelta(minutes=5)
-    stale_at_close = _reading(conn, 0, 0.05, event_started=True, now=process_now, kickoff_utc=kickoff)
+    stale_at_close = LegReadingV2(
+        received_at=opening_reading.received_at, edge=0.05,
+        benchmark_snapshot_id=opening_reading.benchmark_snapshot_id,
+        comparison_snapshot_id=opening_reading.comparison_snapshot_id,
+        edge_model="raw-v1", event_started=True, now=process_now, kickoff_utc=kickoff,
+    )
     result = tracker.ingest(stale_at_close)
 
     obs_after = conn.execute(
         "SELECT COUNT(*) FROM signal_observation WHERE episode_id = ?", (open_result.episode_id,)
     ).fetchone()[0]
     assert obs_after == obs_before  # no duplicate observation inserted
-    assert result.observation_id is not None  # still resolves to the real prior observation (vb.closing needs this)
+    assert result.observation_id == open_result.observation_id  # reused the real prior observation (vb.closing needs this)
+
+
+def test_event_started_with_a_genuinely_new_snapshot_pair_records_it_even_if_timestamp_matches(tmp_path):
+    # Regression found by self-review (2026-07-29): reuse-vs-record used
+    # to be decided purely by comparing timestamps, which would have
+    # wrongly reused a DIFFERENT snapshot pair that happened to share a
+    # received_at with the last observation. The real identity check is
+    # the snapshot pair itself, not the timestamp.
+    conn = _db(tmp_path)
+    strategy_id = _strategy_id(conn)
+    tracker = EpisodeTracker(conn, strategy_id, MARKET_IDENTITY, threshold=0.03)
+
+    open_result = tracker.ingest(_reading(conn, 0, 0.05))
+
+    # A genuinely different snapshot pair, but with the exact same
+    # received_at as the opening reading.
+    new_bench = _snapshot(conn, T0, 2.1)
+    new_comp = _snapshot(conn, T0, 2.2)
+    same_timestamp_but_new_pair = LegReadingV2(
+        received_at=T0, edge=0.05, benchmark_snapshot_id=new_bench, comparison_snapshot_id=new_comp,
+        edge_model="raw-v1", event_started=True, now=T0 + timedelta(hours=3, minutes=5), kickoff_utc=T0 + timedelta(hours=3),
+    )
+    result = tracker.ingest(same_timestamp_but_new_pair)
+
+    assert result.observation_id != open_result.observation_id  # a real new observation, not a stale reuse
+    row = conn.execute(
+        "SELECT benchmark_snapshot_id, comparison_snapshot_id FROM signal_observation WHERE id = ?",
+        (result.observation_id,),
+    ).fetchone()
+    assert row == (new_bench, new_comp)
 
 
 def test_market_suspended_close_uses_process_now_not_stale_reading_time(tmp_path):

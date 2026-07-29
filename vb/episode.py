@@ -109,12 +109,33 @@ class EpisodeTracker:
             return None
         return datetime.fromisoformat(row[0])
 
-    def _last_observation_id(self, episode_id: str) -> Optional[str]:
+    def _find_observation_by_snapshot_pair(self, episode_id: str, reading: LegReadingV2) -> Optional[str]:
+        """The real identity check for "has this exact reading already
+        been recorded" (found by self-review, 2026-07-29): the
+        market_suspended/event_started close branches used to decide
+        reuse-vs-record by comparing `reading.received_at` to the last
+        observation's own timestamp, which is only a proxy for "same
+        snapshot pair" - two genuinely DIFFERENT snapshot pairs sharing
+        a timestamp (unlikely but not impossible) would have been
+        silently treated as identical, closing the episode against the
+        wrong pointer. This queries signal_observation's own UNIQUE key
+        directly instead."""
         row = self.conn.execute(
-            "SELECT id FROM signal_observation WHERE episode_id = ? ORDER BY decision_time DESC LIMIT 1",
-            (episode_id,),
+            "SELECT id FROM signal_observation WHERE episode_id = ? AND benchmark_snapshot_id = ? "
+            "AND comparison_snapshot_id = ? AND edge_model = ?",
+            (episode_id, reading.benchmark_snapshot_id, reading.comparison_snapshot_id, reading.edge_model),
         ).fetchone()
         return row[0] if row is not None else None
+
+    def _observation_id_for_close(self, reading: LegReadingV2, episode_id: str) -> str:
+        """Reuse the existing observation for this exact snapshot pair
+        if one's already recorded (F-03: don't fabricate a duplicate
+        market observation just because the episode is closing); record
+        a genuinely new one otherwise. Shared by the market_suspended
+        and event_started branches below - both need exactly this same
+        decision."""
+        obs_id = self._find_observation_by_snapshot_pair(episode_id, reading)
+        return obs_id if obs_id is not None else self._record_observation(reading, episode_id)
 
     def _record_observation(self, reading: LegReadingV2, episode_id: Optional[str]) -> str:
         obs_id = new_id()
@@ -175,22 +196,16 @@ class EpisodeTracker:
             return EpisodeIngestResult(episode_id=existing.id, observation_id=None)
 
         if reading.market_suspended:
-            # F-03: no new snapshot since the last recorded observation
-            # means don't fabricate one just because the state changed -
-            # reuse the existing last observation's id instead (still a
+            # F-03: don't fabricate a new market observation just because
+            # the state changed - reuse the existing observation for this
+            # exact snapshot pair if one's already recorded (still a
             # valid, real observation for vb.closing to key off).
-            if last_at is not None and reading.received_at <= last_at:
-                obs_id = self._last_observation_id(existing.id)
-            else:
-                obs_id = self._record_observation(reading, existing.id)
+            obs_id = self._observation_id_for_close(reading, existing.id)
             transition_at = reading.now or reading.received_at
             close_signal_episode(self.conn, existing.id, transition_at, EpisodeEndReason.MARKET_SUSPENDED)
             return EpisodeIngestResult(episode_id=existing.id, observation_id=obs_id, closed=True)
         if reading.event_started:
-            if last_at is not None and reading.received_at <= last_at:
-                obs_id = self._last_observation_id(existing.id)
-            else:
-                obs_id = self._record_observation(reading, existing.id)
+            obs_id = self._observation_id_for_close(reading, existing.id)
             # F-03's precise fix: ended_at = max(process_now, kickoff_at)
             # - the state transition happened at `now`, using data that
             # may have been captured well before kickoff (the common

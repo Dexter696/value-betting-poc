@@ -82,6 +82,15 @@ BETTING_URL = "https://api.betfair.com/exchange/betting/json-rpc/v1"
 SOCCER_EVENT_TYPE_ID = "1"  # Betfair's well-known eventTypeId for soccer
 DEFAULT_COMMISSION_RATE = 0.05
 
+# Betfair's documented error codes for an expired/invalid session token
+# (interactive sessions are short-lived by design - see module
+# docstring). Best-effort from Betfair's published API error reference,
+# not live-verified against a real account (this client has never run
+# against production - no credentials exist yet, see module docstring)
+# - worth confirming against a real 401-equivalent response once
+# credentials are available.
+_SESSION_ERROR_CODES = frozenset({"INVALID_SESSION_INFORMATION", "NO_SESSION", "NOT_AUTHORIZED"})
+
 
 class BetfairAuthError(Exception):
     pass
@@ -146,7 +155,7 @@ class BetfairClient:
             "Content-Type": "application/json",
         }
 
-    def _call(self, method: str, params: dict):
+    def _call(self, method: str, params: dict, _retried: bool = False):
         resp = requests.post(
             BETTING_URL,
             headers=self._headers(),
@@ -156,6 +165,20 @@ class BetfairClient:
         resp.raise_for_status()
         payload = resp.json()
         if "error" in payload:
+            # Exact nesting isn't fully confirmed live yet (no
+            # credentials to test against - see module docstring), so
+            # this checks both the flat shape and Betfair's documented
+            # nested APINGException shape rather than assuming one.
+            error_obj = payload["error"]
+            error_code = error_obj.get("errorCode") or ((error_obj.get("data") or {}).get("APINGException") or {}).get("errorCode")
+            if not _retried and error_code in _SESSION_ERROR_CODES:
+                # Session expired mid-scrape (e.g. between chunked
+                # listMarketBook calls in fetch_soccer_match_odds) -
+                # force a fresh login and retry exactly once, rather
+                # than aborting the whole scrape for a routine session
+                # expiry (found by self-review, 2026-07-29).
+                self._session_token = None
+                return self._call(method, params, _retried=True)
             raise BetfairAuthError(f"Betfair API error calling {method}: {payload['error']}")
         return payload["result"]
 
