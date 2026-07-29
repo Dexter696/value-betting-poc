@@ -295,7 +295,16 @@ def run_pipeline_v2(conn) -> None:
             log.info("closing consensus v2 (shadow) vs %s: %d snapshot(s) recorded", comparison_site, closings)
 
 
-def main() -> None:
+def main() -> RunStatus:
+    """Returns the cycle's capture_run status. F-16: every stage below is
+    deliberately isolated in its own try/except so one failing site or
+    pipeline step never aborts the rest of the cycle - but that same
+    isolation previously meant NOTHING ever propagated failure back to
+    the process exit code, so a cycle where every single capture site
+    failed still looked green in GitHub Actions. The caller (__main__)
+    now exits non-zero on a FAILED capture_run - a total capture
+    failure is a real signal worth a red CI check, unlike PARTIAL
+    (some sites failed, expected/tolerable degradation)."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--full-swisslos", action="store_true",
@@ -345,11 +354,9 @@ def main() -> None:
                 log.error("v2 shadow failure-recording itself failed for %s:\n%s", site, traceback.format_exc())
             v2_ok.append(False)
 
+    capture_run_status = RunStatus.SUCCESS if all(v2_ok) else (RunStatus.PARTIAL if any(v2_ok) else RunStatus.FAILED)
     try:
-        end_capture_run(
-            conn, capture_run_id,
-            RunStatus.SUCCESS if all(v2_ok) else (RunStatus.PARTIAL if any(v2_ok) else RunStatus.FAILED),
-        )
+        end_capture_run(conn, capture_run_id, capture_run_status)
     except Exception:
         log.error("v2 end_capture_run failed:\n%s", traceback.format_exc())
 
@@ -383,7 +390,10 @@ def main() -> None:
         log.error("pruning failed:\n%s", traceback.format_exc())
 
     log.info("=== cycle end ===")
+    return capture_run_status
 
 
 if __name__ == "__main__":
-    main()
+    status = main()
+    if status == RunStatus.FAILED:
+        sys.exit(1)

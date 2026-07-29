@@ -18,12 +18,19 @@ is real deletion.
 
 Dedupes on each table's real natural key rather than raw autoincrement
 ids, which have no meaning across two independently-created databases:
-  - raw_event: (site, event_id) - static match info, dest's row wins on
-    conflict (shouldn't meaningfully differ between sources).
+  - raw_event: (site, event_id) - source's row wins on a real conflict
+    (matches vb.storage.save_raw_capture()'s own live ON CONFLICT DO
+    UPDATE semantics - "latest capture wins", not "whichever database
+    happened to be dest wins" - see the F-11 note below).
   - raw_market_snapshot: no declared natural key, so the full tuple
     (site, event_id, market_type, line, captured_at) is used - only
     genuinely new capture cycles get inserted.
-  - event_match_review / settlement: their own schema UNIQUE constraints.
+  - event_match_review: (benchmark_site, benchmark_event_id,
+    comparison_site, comparison_event_id) - a reviewed row (approved/
+    rejected) always wins over a pending one from either side, so a
+    real human decision can never be silently discarded just because
+    of which database happened to be passed as dest (see the F-11 note
+    below); settlement: its own schema UNIQUE constraints.
 
 opportunity.instance_id ("{market_key}#{seq}") is a different problem:
 it's deterministic *within* one database, not guaranteed unique *across*
@@ -222,11 +229,39 @@ def merge(source_path: str, dest_path: str) -> dict:
     import sqlite3
 
     dest = sqlite3.connect(dest_path)
+    dest.execute("PRAGMA foreign_keys = ON")
     dest.execute("ATTACH DATABASE ? AS src", (str(source_path),))
     counts: dict[str, int] = {}
 
-    cur = dest.execute("INSERT OR IGNORE INTO main.raw_event SELECT * FROM src.raw_event")
-    counts["raw_event"] = cur.rowcount
+    # NOT a plain INSERT OR IGNORE (F-11, 2026-07-29): that keeps dest's
+    # row unconditionally on conflict, but vb.storage.save_raw_capture()'s
+    # own live upsert path (ON CONFLICT DO UPDATE) always takes the
+    # LATEST capture's data - a merge that instead always kept the older
+    # side would silently reintroduce whichever of the two streams
+    # captured a stale/wrong value first (e.g. the 2026-07-29 Swisslos
+    # timezone bug corrupted kickoff_utc for weeks; a merge in the wrong
+    # direction could have kept the corrupted value even after the fix
+    # landed and the other stream recaptured the correct one). Mirrors
+    # the live path exactly: source's row always wins on conflict.
+    # SQLite's grammar rejects INSERT...SELECT...ON CONFLICT DO UPDATE as
+    # a single bulk statement ("near DO: syntax error") - the upsert
+    # clause is only accepted after a VALUES source, so this is a
+    # per-row loop rather than one bulk statement.
+    raw_event_touched = 0
+    for row in dest.execute("""
+        SELECT site, event_id, sport, competition, kickoff_utc, raw_home_team, raw_away_team FROM src.raw_event
+    """).fetchall():
+        cur = dest.execute("""
+            INSERT INTO main.raw_event (site, event_id, sport, competition, kickoff_utc, raw_home_team, raw_away_team)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(site, event_id) DO UPDATE SET
+                sport = excluded.sport, competition = excluded.competition, kickoff_utc = excluded.kickoff_utc,
+                raw_home_team = excluded.raw_home_team, raw_away_team = excluded.raw_away_team
+            WHERE main.raw_event.competition != excluded.competition OR main.raw_event.kickoff_utc != excluded.kickoff_utc
+               OR main.raw_event.raw_home_team != excluded.raw_home_team OR main.raw_event.raw_away_team != excluded.raw_away_team
+        """, row)
+        raw_event_touched += cur.rowcount
+    counts["raw_event"] = raw_event_touched
 
     cur = dest.execute("""
         INSERT INTO main.raw_market_snapshot (site, event_id, market_type, line, outcomes_json, max_bet_size, captured_at)
@@ -240,13 +275,59 @@ def merge(source_path: str, dest_path: str) -> dict:
     """)
     counts["raw_market_snapshot"] = cur.rowcount
 
-    cur = dest.execute("""
-        INSERT OR IGNORE INTO main.event_match_review
-            (benchmark_site, benchmark_event_id, comparison_site, comparison_event_id, score, reasons_json, first_seen_at, last_seen_at, status, reviewed_at)
-        SELECT benchmark_site, benchmark_event_id, comparison_site, comparison_event_id, score, reasons_json, first_seen_at, last_seen_at, status, reviewed_at
+    # NOT a plain INSERT OR IGNORE (F-11, 2026-07-29): that always keeps
+    # dest's row on conflict, which is directionally unsafe for a human
+    # review decision - if dest's row is still 'pending' but source's
+    # copy of the SAME candidate was already reviewed (status
+    # approved/rejected, reviewed_at set), a naive merge would silently
+    # discard that real human decision depending only on which database
+    # happened to be passed as dest. Policy: a reviewed row always wins
+    # over a pending one regardless of side; two reviewed rows keep
+    # dest's decision (conservative - a genuine double-review conflict
+    # is rare enough to leave the SUM(*) unchanged for later manual
+    # inspection rather than guess); two pending rows just take the
+    # later last_seen_at as a plain "still open, seen again" update.
+    event_match_review_touched = 0
+    for row in dest.execute("""
+        SELECT benchmark_site, benchmark_event_id, comparison_site, comparison_event_id,
+               score, reasons_json, first_seen_at, last_seen_at, status, reviewed_at
         FROM src.event_match_review
-    """)
-    counts["event_match_review"] = cur.rowcount
+    """).fetchall():
+        (bench_site, bench_id, comp_site, comp_id, score, reasons_json, first_seen_at, last_seen_at, status, reviewed_at) = row
+        existing = dest.execute("""
+            SELECT status, last_seen_at FROM main.event_match_review
+            WHERE benchmark_site = ? AND benchmark_event_id = ? AND comparison_site = ? AND comparison_event_id = ?
+        """, (bench_site, bench_id, comp_site, comp_id)).fetchone()
+
+        if existing is None:
+            dest.execute("""
+                INSERT INTO main.event_match_review
+                    (benchmark_site, benchmark_event_id, comparison_site, comparison_event_id, score, reasons_json, first_seen_at, last_seen_at, status, reviewed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, row)
+            event_match_review_touched += 1
+            continue
+
+        dest_status, dest_last_seen_at = existing
+        if dest_status == "pending" and status != "pending":
+            # source has a real decision dest lacks - take it, along with
+            # whichever last_seen_at is actually later (freshest sighting).
+            dest.execute("""
+                UPDATE main.event_match_review
+                SET score = ?, reasons_json = ?, last_seen_at = MAX(last_seen_at, ?), status = ?, reviewed_at = ?
+                WHERE benchmark_site = ? AND benchmark_event_id = ? AND comparison_site = ? AND comparison_event_id = ?
+            """, (score, reasons_json, last_seen_at, status, reviewed_at, bench_site, bench_id, comp_site, comp_id))
+            event_match_review_touched += 1
+        elif dest_status != "pending":
+            pass  # dest already has a decision (own or a prior merge's) - never overwritten by source
+        elif last_seen_at > dest_last_seen_at:
+            # both still pending - just record that it was seen again more recently
+            dest.execute("""
+                UPDATE main.event_match_review SET last_seen_at = ?
+                WHERE benchmark_site = ? AND benchmark_event_id = ? AND comparison_site = ? AND comparison_event_id = ?
+            """, (last_seen_at, bench_site, bench_id, comp_site, comp_id))
+            event_match_review_touched += 1
+    counts["event_match_review"] = event_match_review_touched
 
     # NOT a plain INSERT OR IGNORE: SQLite's UNIQUE constraint never
     # treats two NULLs as equal, and `line` is NULL for every
