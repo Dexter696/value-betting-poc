@@ -1,6 +1,6 @@
-# VPS Migration Plan (draft — research only, not executed)
+# VPS Migration Plan (declined, 2026-07-29 — kept for reference)
 
-**Status**: research/planning artifact. Nothing in this document has been acted on — no VPS has been provisioned, no DNS or infrastructure changed. This is a proposal for review, per the standing rule that infrastructure migrations get a plan, not unilateral action.
+**Status**: reviewed and declined by the project owner on 2026-07-29 — staying on GitHub Actions' free tier rather than taking on a VPS's recurring cost/operational burden while the current setup keeps working. Nothing in this document was ever acted on — no VPS was provisioned, no DNS or infrastructure changed. Kept here as reference in case the tradeoff calculus changes later (e.g. if GitHub Actions' known limitations, listed below, actually start causing real problems) — not an active proposal.
 
 ## Why this is worth doing (grounded in what actually happened today)
 
