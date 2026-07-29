@@ -50,6 +50,7 @@ logging.basicConfig(
 log = logging.getLogger("vb.scheduler")
 
 from vb.capture_v2 import end_capture_run, record_source_capture, record_source_failure, start_capture_run
+from vb.closing import process_cycle_closings
 from vb.decision_runner import process_cycle_decisions
 from vb.exposure import ExposureLimits
 from vb.freshness import FreshnessLimits
@@ -257,12 +258,13 @@ def run_pipeline_v2(conn) -> None:
     (same call, a devigged-v1 StrategyDefinition and
     `edge_selector=lambda leg: leg.edge_b`) once there's a reason to
     want it running continuously rather than just tested."""
+    now = datetime.now(timezone.utc)
     config = {"signal_model": "raw-v1", "threshold": THRESHOLD, "shadow_mode": True}
     strategy = StrategyDefinition(
         id=new_id(), signal_model="raw-v1", threshold=THRESHOLD,
         max_age_s=SHADOW_FRESHNESS_LIMITS.max_age_s, max_skew_s=SHADOW_FRESHNESS_LIMITS.max_skew_s,
         min_lead_time_s=SHADOW_FRESHNESS_LIMITS.min_lead_time_s, config=config,
-        config_hash=content_hash(config), created_at=datetime.now(timezone.utc),
+        config_hash=content_hash(config), created_at=now,
     )
     get_or_create_strategy_definition(conn, strategy)
 
@@ -286,6 +288,10 @@ def run_pipeline_v2(conn) -> None:
                 "decisions v2 (shadow) vs %s: %d new bet_decision/bet_execution recorded",
                 comparison_site, len(executions),
             )
+
+        closings = process_cycle_closings(conn, results, now=now)
+        if closings:
+            log.info("closing consensus v2 (shadow) vs %s: %d snapshot(s) recorded", comparison_site, closings)
 
 
 def main() -> None:
