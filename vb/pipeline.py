@@ -525,6 +525,8 @@ def run_cycle_v2(
             reject_reason=RejectReason(freshness.reject_reason) if freshness.reject_reason else None,
             market_suspended=False,
             event_started=now >= leg.benchmark_event.kickoff_utc,
+            now=now,
+            kickoff_utc=leg.benchmark_event.kickoff_utc,
         )
         tracker = EpisodeTracker(conn, strategy_id, market_identity, threshold=strategy.threshold)
         results.append(tracker.ingest(reading))

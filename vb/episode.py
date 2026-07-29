@@ -52,6 +52,17 @@ class LegReadingV2:
     vb.freshness.check_freshness() - an ineligible reading is still
     recorded as a signal_observation (never silently dropped), it just
     never opens or extends an episode.
+
+    `received_at` is the last real ODDS observation's own timestamp -
+    NOT necessarily when the pipeline process actually ran. `now` (F-03)
+    is that real wall-clock time, used only for closing an episode on
+    market_suspended/event_started: the transition itself happened at
+    `now`, using data that may have been captured much earlier (no new
+    snapshot since kickoff is the common case, not an edge case).
+    `kickoff_utc` is the benchmark event's kickoff, used as the audit's
+    prescribed floor on an event_started close (`ended_at = max(now,
+    kickoff_utc)`) so a late pipeline run can never record an episode as
+    having ended before the match it's closing on actually started.
     """
 
     received_at: datetime
@@ -63,6 +74,8 @@ class LegReadingV2:
     reject_reason: Optional[RejectReason] = None
     market_suspended: bool = False
     event_started: bool = False
+    now: Optional[datetime] = None
+    kickoff_utc: Optional[datetime] = None
 
 
 @dataclass
@@ -95,6 +108,13 @@ class EpisodeTracker:
         if row is None or row[0] is None:
             return None
         return datetime.fromisoformat(row[0])
+
+    def _last_observation_id(self, episode_id: str) -> Optional[str]:
+        row = self.conn.execute(
+            "SELECT id FROM signal_observation WHERE episode_id = ? ORDER BY decision_time DESC LIMIT 1",
+            (episode_id,),
+        ).fetchone()
+        return row[0] if row is not None else None
 
     def _record_observation(self, reading: LegReadingV2, episode_id: Optional[str]) -> str:
         obs_id = new_id()
@@ -155,12 +175,30 @@ class EpisodeTracker:
             return EpisodeIngestResult(episode_id=existing.id, observation_id=None)
 
         if reading.market_suspended:
-            obs_id = self._record_observation(reading, existing.id)
-            close_signal_episode(self.conn, existing.id, reading.received_at, EpisodeEndReason.MARKET_SUSPENDED)
+            # F-03: no new snapshot since the last recorded observation
+            # means don't fabricate one just because the state changed -
+            # reuse the existing last observation's id instead (still a
+            # valid, real observation for vb.closing to key off).
+            if last_at is not None and reading.received_at <= last_at:
+                obs_id = self._last_observation_id(existing.id)
+            else:
+                obs_id = self._record_observation(reading, existing.id)
+            transition_at = reading.now or reading.received_at
+            close_signal_episode(self.conn, existing.id, transition_at, EpisodeEndReason.MARKET_SUSPENDED)
             return EpisodeIngestResult(episode_id=existing.id, observation_id=obs_id, closed=True)
         if reading.event_started:
-            obs_id = self._record_observation(reading, existing.id)
-            close_signal_episode(self.conn, existing.id, reading.received_at, EpisodeEndReason.EVENT_STARTED)
+            if last_at is not None and reading.received_at <= last_at:
+                obs_id = self._last_observation_id(existing.id)
+            else:
+                obs_id = self._record_observation(reading, existing.id)
+            # F-03's precise fix: ended_at = max(process_now, kickoff_at)
+            # - the state transition happened at `now`, using data that
+            # may have been captured well before kickoff (the common
+            # case, not an edge case), and must never be recorded as
+            # ending before the kickoff it's closing on.
+            transition_now = reading.now or reading.received_at
+            ended_at = max(transition_now, reading.kickoff_utc) if reading.kickoff_utc is not None else transition_now
+            close_signal_episode(self.conn, existing.id, ended_at, EpisodeEndReason.EVENT_STARTED)
             return EpisodeIngestResult(episode_id=existing.id, observation_id=obs_id, closed=True)
         if reading.edge < self.threshold:
             obs_id = self._record_observation(reading, existing.id)

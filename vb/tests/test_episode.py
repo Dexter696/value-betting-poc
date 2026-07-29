@@ -222,6 +222,79 @@ def test_event_started_bypasses_the_stale_timestamp_guard(tmp_path):
     assert reason == "event_started"
 
 
+def test_event_started_close_uses_kickoff_floor_not_stale_reading_time(tmp_path):
+    # F-03 (2026-07-29): a close on event_started used to stamp ended_at
+    # with the stale reading's own received_at, which for a match where
+    # no new odds arrived since well before kickoff meant ended_at could
+    # land far BEFORE the real kickoff. The precise fix: ended_at =
+    # max(process_now, kickoff_at).
+    conn = _db(tmp_path)
+    strategy_id = _strategy_id(conn)
+    tracker = EpisodeTracker(conn, strategy_id, MARKET_IDENTITY, threshold=0.03)
+
+    tracker.ingest(_reading(conn, 0, 0.05))  # opens at T0, stale odds frozen here
+    kickoff = T0 + timedelta(hours=3)
+    process_now = kickoff + timedelta(minutes=20)  # pipeline actually ran 20min after kickoff
+    result = tracker.ingest(_reading(conn, 0, 0.05, event_started=True, now=process_now, kickoff_utc=kickoff))
+
+    assert result.closed
+    ended_at = conn.execute("SELECT ended_at FROM signal_episode WHERE id = ?", (result.episode_id,)).fetchone()[0]
+    assert datetime.fromisoformat(ended_at) == process_now
+    assert datetime.fromisoformat(ended_at) >= kickoff
+
+
+def test_event_started_close_floors_ended_at_at_kickoff_even_if_process_now_is_earlier(tmp_path):
+    conn = _db(tmp_path)
+    strategy_id = _strategy_id(conn)
+    tracker = EpisodeTracker(conn, strategy_id, MARKET_IDENTITY, threshold=0.03)
+
+    tracker.ingest(_reading(conn, 0, 0.05))
+    kickoff = T0 + timedelta(hours=3)
+    process_now = kickoff - timedelta(minutes=1)  # event_started fired right at the kickoff boundary
+    result = tracker.ingest(_reading(conn, 0, 0.05, event_started=True, now=process_now, kickoff_utc=kickoff))
+
+    ended_at = conn.execute("SELECT ended_at FROM signal_episode WHERE id = ?", (result.episode_id,)).fetchone()[0]
+    assert datetime.fromisoformat(ended_at) == kickoff  # floored up to kickoff, not process_now
+
+
+def test_event_started_with_no_new_snapshot_does_not_duplicate_observation(tmp_path):
+    # F-03: "must not add a new market observation if a new snapshot
+    # wasn't actually fetched" - closing on stale, already-recorded odds
+    # must not fabricate a second observation row at the same timestamp.
+    conn = _db(tmp_path)
+    strategy_id = _strategy_id(conn)
+    tracker = EpisodeTracker(conn, strategy_id, MARKET_IDENTITY, threshold=0.03)
+
+    open_result = tracker.ingest(_reading(conn, 0, 0.05))
+    obs_before = conn.execute(
+        "SELECT COUNT(*) FROM signal_observation WHERE episode_id = ?", (open_result.episode_id,)
+    ).fetchone()[0]
+
+    kickoff = T0 + timedelta(hours=3)
+    process_now = kickoff + timedelta(minutes=5)
+    stale_at_close = _reading(conn, 0, 0.05, event_started=True, now=process_now, kickoff_utc=kickoff)
+    result = tracker.ingest(stale_at_close)
+
+    obs_after = conn.execute(
+        "SELECT COUNT(*) FROM signal_observation WHERE episode_id = ?", (open_result.episode_id,)
+    ).fetchone()[0]
+    assert obs_after == obs_before  # no duplicate observation inserted
+    assert result.observation_id is not None  # still resolves to the real prior observation (vb.closing needs this)
+
+
+def test_market_suspended_close_uses_process_now_not_stale_reading_time(tmp_path):
+    conn = _db(tmp_path)
+    strategy_id = _strategy_id(conn)
+    tracker = EpisodeTracker(conn, strategy_id, MARKET_IDENTITY, threshold=0.03)
+
+    tracker.ingest(_reading(conn, 0, 0.05))
+    process_now = T0 + timedelta(minutes=45)
+    result = tracker.ingest(_reading(conn, 0, 0.05, market_suspended=True, now=process_now))
+
+    ended_at = conn.execute("SELECT ended_at FROM signal_episode WHERE id = ?", (result.episode_id,)).fetchone()[0]
+    assert datetime.fromisoformat(ended_at) == process_now
+
+
 def test_f02_reproduction_through_the_real_tracker_class(tmp_path):
     """The audit's exact F-02 scenario, but end-to-end through
     EpisodeTracker itself rather than raw storage calls - two
