@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from vb.decision_runner import process_cycle_decisions, process_episode_decision
 from vb.episode import EpisodeTracker, LegReadingV2
+from vb.exposure import ExposureLimits
 from vb.identity import content_hash, new_id
 from vb.models import (
     CaptureRun,
@@ -167,3 +168,50 @@ def test_process_cycle_decisions_handles_a_mixed_batch(tmp_path):
     executions = process_cycle_decisions(conn, [opened_result, below_threshold_result], ImmediateEntryPolicy(threshold=0.03))
 
     assert len(executions) == 1
+
+
+SECOND_MARKET_IDENTITY = market_key(BENCHMARK_EVENT, MarketType.MATCH_WINNER, None, Selection.AWAY, "swisslos.ch")
+
+
+def test_exposure_limit_blocks_a_new_bet_that_would_exceed_event_stake(tmp_path):
+    conn = _db(tmp_path)
+    strategy_id = _strategy_id(conn)
+    policy = ImmediateEntryPolicy(threshold=0.03)
+
+    # first bet on this event: uses up the entire event-level allowance
+    first_result, _ = _open_episode(conn, strategy_id, comparison_odds=2.30)
+    first_execution = process_episode_decision(conn, first_result, policy)
+    assert first_execution is not None
+
+    # a second, independent episode on the SAME real event (different
+    # selection) - a live production run_cycle_v2() would legitimately
+    # produce more than one leg per event
+    tracker = EpisodeTracker(conn, strategy_id, SECOND_MARKET_IDENTITY, threshold=0.03)
+    bench_snap, _ = _snapshot(conn, T0, 2.0)
+    comp_snap, _ = _snapshot(conn, T0, 2.30)
+    second_result = tracker.ingest(LegReadingV2(
+        received_at=T0, edge=0.05, benchmark_snapshot_id=bench_snap, comparison_snapshot_id=comp_snap, edge_model="raw-v1",
+    ))
+
+    limits = ExposureLimits(max_stake_per_event=1.0, max_stake_per_site=10.0)
+    second_execution = process_episode_decision(conn, second_result, policy, limits=limits)
+
+    assert second_execution is None
+    # blocked BEFORE recording - the idempotency key was never consumed,
+    # so a later cycle (once exposure frees up) can still decide this
+    assert conn.execute("SELECT COUNT(*) FROM bet_decision").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM bet_execution").fetchone()[0] == 1
+
+
+def test_exposure_limit_allows_a_bet_within_the_configured_ceiling(tmp_path):
+    conn = _db(tmp_path)
+    strategy_id = _strategy_id(conn)
+    policy = ImmediateEntryPolicy(threshold=0.03)
+
+    result, _ = _open_episode(conn, strategy_id, comparison_odds=2.30)
+    limits = ExposureLimits(max_stake_per_event=10.0, max_stake_per_site=10.0)
+
+    execution = process_episode_decision(conn, result, policy, limits=limits)
+
+    assert execution is not None
+    assert conn.execute("SELECT COUNT(*) FROM bet_decision").fetchone()[0] == 1

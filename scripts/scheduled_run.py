@@ -51,6 +51,7 @@ log = logging.getLogger("vb.scheduler")
 
 from vb.capture_v2 import end_capture_run, record_source_capture, record_source_failure, start_capture_run
 from vb.decision_runner import process_cycle_decisions
+from vb.exposure import ExposureLimits
 from vb.freshness import FreshnessLimits
 from vb.identity import content_hash, new_id
 from vb.models import RunStatus, StrategyDefinition
@@ -84,6 +85,15 @@ RAW_SNAPSHOT_RETENTION_HOURS = 24
 # often enough to be useful for exercising the new pipeline against real
 # data, while still being a real, honest gate rather than disabled.
 SHADOW_FRESHNESS_LIMITS = FreshnessLimits(max_age_s=3 * 3600, max_skew_s=1800, min_lead_time_s=1800)
+
+# Shadow-mode exposure ceiling (Phase 5 step 6): every shadow bet is a
+# flat 1.0-unit stake, so these caps just bound how many concurrent
+# legs on the same real event / the same comparison site the shadow
+# pipeline will let itself "hold" at once - a real, honest limit
+# (not disabled), sized generously for a paper-trading shadow rather
+# than the tighter risk limits a real pre-registered experiment
+# (Phase 7) would set.
+SHADOW_EXPOSURE_LIMITS = ExposureLimits(max_stake_per_event=3.0, max_stake_per_site=25.0)
 
 
 def _git_sha() -> str:
@@ -254,7 +264,7 @@ def run_pipeline_v2(conn) -> None:
             comparison_site, len(results), opened, closed, ineligible,
         )
 
-        executions = process_cycle_decisions(conn, results, entry_policy)
+        executions = process_cycle_decisions(conn, results, entry_policy, limits=SHADOW_EXPOSURE_LIMITS)
         if executions:
             log.info(
                 "decisions v2 (shadow) vs %s: %d new bet_decision/bet_execution recorded",
