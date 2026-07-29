@@ -62,7 +62,7 @@ from vb.settlement_evidence import record_settlement_for_event
 from vb.strategy import ImmediateEntryPolicy
 from vb.sources.loro import LoroClient
 from vb.sources.pinnacle import PinnacleClient
-from vb.sources.results import find_result
+from vb.sources.results import find_result_with_evidence
 from vb.sources.swisslos import SwisslosClient
 from vb.storage import (
     CURRENT_SCHEMA_VERSION,
@@ -215,10 +215,10 @@ def auto_settle(conn) -> None:
     unsettled = list_unsettled_matches(conn, "pinnacle.com")
     settled_count = 0
     for event in unsettled:
-        result = find_result(event.competition, event.raw_home_team, event.raw_away_team, event.kickoff_utc)
+        result = find_result_with_evidence(event.competition, event.raw_home_team, event.raw_away_team, event.kickoff_utc)
         if result is None:
             continue
-        home_goals, away_goals = result
+        home_goals, away_goals = result.score
         record_match_result(conn, "pinnacle.com", event.event_id, home_goals, away_goals, source="auto:espn")
         settled_count += 1
 
@@ -231,6 +231,7 @@ def auto_settle(conn) -> None:
             legs = record_settlement_for_event(
                 conn, "pinnacle.com", event.event_id, provider="espn",
                 home_goals=home_goals, away_goals=away_goals, now=now,
+                raw_payload_hash=result.raw_payload_hash, source_url=result.source_url,
             )
             if legs:
                 log.info("settlement evidence v2: %d leg(s) settled for event %s", legs, event.event_id)

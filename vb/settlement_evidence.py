@@ -13,13 +13,22 @@ correction creates a new version pointing at the one it supersedes
 rather than silently rewriting history the way v1's mutable
 `settlement` table could.
 
-Deliberately does NOT wire raw-response archiving into any scraper's
-HTTP layer here — archive_raw_response() is the hashing primitive a
-scraper would call, but deciding WHERE the archived bytes actually get
-written (local disk vs. object storage) is an infrastructure decision
-that belongs with Phase 2's VPS migration, and touching every
-scraper's live HTTP path is a materially different, higher-blast-radius
-change than everything else in this module.
+Deliberately does NOT wire raw-response BYTE archiving into any odds
+scraper's HTTP layer — archive_raw_response() is the hashing primitive
+a scraper would call, but deciding WHERE the archived bytes actually
+get written (local disk vs. object storage) is an infrastructure
+decision that belongs with Phase 2's VPS migration, and touching all
+three odds scrapers' live HTTP paths is a materially higher-blast-
+radius change than everything else in this module.
+
+The one exception (2026-07-29): `record_settlement_for_event`'s
+optional `raw_payload_hash`/`source_url` come from
+`vb.sources.results.find_result_with_evidence`, which hashes ESPN's
+scoreboard response WITHOUT storing the bytes anywhere - the hash is
+tamper-evidence for whatever score got recorded, not a byte-for-byte
+archive. Lower blast radius than the odds scrapers (one already-
+audited settlement path, not three live capture paths) and doesn't
+need a storage-location decision since nothing new is being persisted.
 """
 
 from __future__ import annotations
@@ -132,6 +141,7 @@ def record_result_evidence(
 
 def record_settlement_for_event(
     conn, benchmark_site: str, benchmark_event_id: str, provider: str, home_goals: int, away_goals: int, now: datetime,
+    raw_payload_hash: Optional[str] = None, source_url: Optional[str] = None,
 ) -> int:
     """The real live-wiring entry point: given a benchmark event's final
     score, records ONE ResultEvidence and a SettlementVersion for every
@@ -172,6 +182,7 @@ def record_settlement_for_event(
     evidence_id = record_result_evidence(
         conn, canonical_id, provider=provider, retrieved_at=now, status="final",
         home_goals=home_goals, away_goals=away_goals,
+        raw_payload_hash=raw_payload_hash, source_url=source_url,
     )
 
     market_identity_rows = conn.execute(

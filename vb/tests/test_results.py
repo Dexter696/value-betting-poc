@@ -1,7 +1,8 @@
 from datetime import datetime, timezone
 
+from vb.identity import content_hash_bytes
 from vb.sources import results as results_module
-from vb.sources.results import MIN_TEAM_SIMILARITY, _espn_slug_for, _team_similarity, find_result
+from vb.sources.results import MIN_TEAM_SIMILARITY, _espn_slug_for, _team_similarity, find_result, find_result_with_evidence
 
 
 def test_slug_for_top_flight_league():
@@ -83,6 +84,8 @@ def test_slug_for_sweden_superettan_second_tier():
 class _FakeResponse:
     def __init__(self, payload):
         self._payload = payload
+        self.content = str(payload).encode("utf-8")
+        self.url = "https://site.api.espn.com/fake/scoreboard"
 
     def raise_for_status(self):
         pass
@@ -146,6 +149,31 @@ def test_find_result_still_rejects_a_live_or_scheduled_match(monkeypatch):
         datetime(2026, 7, 28, 18, 0, tzinfo=timezone.utc),
     )
     assert result is None
+
+
+def test_find_result_with_evidence_returns_hash_and_source_url_alongside_score(monkeypatch):
+    payload = {"events": [_espn_event("Dinamo Zagreb", "FC Thun", 3, 2, "STATUS_FULL_TIME")]}
+    monkeypatch.setattr(results_module.requests, "get", lambda *a, **k: _FakeResponse(payload))
+
+    result = find_result_with_evidence(
+        "UEFA - Champions League Qualifiers", "Dinamo Zagreb", "Thun",
+        datetime(2026, 7, 28, 18, 0, tzinfo=timezone.utc),
+    )
+
+    assert result is not None
+    assert result.score == (3, 2)
+    assert result.raw_payload_hash == content_hash_bytes(str(payload).encode("utf-8"))
+    assert result.source_url == "https://site.api.espn.com/fake/scoreboard"
+
+
+def test_find_result_with_evidence_returns_none_when_unmatched(monkeypatch):
+    payload = {"events": [_espn_event("Dinamo Zagreb", "FC Thun", 1, 0, "STATUS_IN_PROGRESS")]}
+    monkeypatch.setattr(results_module.requests, "get", lambda *a, **k: _FakeResponse(payload))
+
+    assert find_result_with_evidence(
+        "UEFA - Champions League Qualifiers", "Dinamo Zagreb", "Thun",
+        datetime(2026, 7, 28, 18, 0, tzinfo=timezone.utc),
+    ) is None
 
 
 def test_team_similarity_matches_short_pinnacle_name_via_new_aliases():

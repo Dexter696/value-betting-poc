@@ -31,12 +31,14 @@ Matching a Pinnacle event to an ESPN fixture happens in two stages:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
 import requests
 from rapidfuzz import fuzz
 
+from ..identity import content_hash_bytes
 from ..normalize import normalize_team_name
 
 BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer"
@@ -217,6 +219,18 @@ def _team_similarity(a: str, b: str) -> float:
     return fuzz.token_sort_ratio(na, nb)
 
 
+@dataclass(frozen=True)
+class ESPNResult:
+    """A settled score plus the evidence trail for it (F-17) - the raw
+    scoreboard response's content hash and the exact URL fetched, so a
+    ResultEvidence row can point at something independently
+    re-verifiable instead of a bare score."""
+
+    score: tuple[int, int]
+    raw_payload_hash: str
+    source_url: str
+
+
 def find_result(competition: str, home_team: str, away_team: str, kickoff_utc: datetime) -> Optional[tuple[int, int]]:
     """Look up a finished match's final score. Returns None (never
     raises) if the competition isn't mapped, ESPN has no matching
@@ -224,14 +238,27 @@ def find_result(competition: str, home_team: str, away_team: str, kickoff_utc: d
     both sides - all of those are "couldn't automate this one", not
     errors, and the caller should fall back to manual entry.
     """
+    result = find_result_with_evidence(competition, home_team, away_team, kickoff_utc)
+    return result.score if result is not None else None
+
+
+def find_result_with_evidence(
+    competition: str, home_team: str, away_team: str, kickoff_utc: datetime
+) -> Optional[ESPNResult]:
+    """Same lookup as find_result(), but also returns the raw scoreboard
+    response's content hash and source URL - the evidence half of F-17's
+    fix, for callers that record settlement into the v2 schema (see
+    vb.settlement_evidence.record_settlement_for_event)."""
     slug = _espn_slug_for(competition)
     if slug is None:
         return None
 
     date_from = (kickoff_utc - timedelta(days=1)).strftime("%Y%m%d")
     date_to = (kickoff_utc + timedelta(days=1)).strftime("%Y%m%d")
+    url = f"{BASE_URL}/{slug}/scoreboard"
+    params = {"dates": f"{date_from}-{date_to}"}
     try:
-        resp = requests.get(f"{BASE_URL}/{slug}/scoreboard", params={"dates": f"{date_from}-{date_to}"}, timeout=10)
+        resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
         events = resp.json().get("events", [])
     except (requests.RequestException, ValueError):
@@ -261,4 +288,8 @@ def find_result(competition: str, home_team: str, away_team: str, kickoff_utc: d
                 continue
             best_score, best_result = pair_score, candidate
 
-    return best_result if best_score >= MIN_TEAM_SIMILARITY else None
+    if best_score < MIN_TEAM_SIMILARITY or best_result is None:
+        return None
+    return ESPNResult(
+        score=best_result, raw_payload_hash=content_hash_bytes(resp.content), source_url=resp.url,
+    )
