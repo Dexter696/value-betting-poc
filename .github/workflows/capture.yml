@@ -43,6 +43,16 @@ concurrency:
 jobs:
   capture:
     runs-on: ubuntu-latest
+    # F-08: the "Backup database to db-sync release" step's
+    # `gh release upload` needs contents: write on the auto-generated
+    # GITHUB_TOKEN. With no permissions block at all, this job fell
+    # back to the repo's default token permissions - confirmed live
+    # 2026-07-29 that this defaults to read-only here, so every daily
+    # handicap-sweep cycle's backup step failed with a 403 and the job
+    # was reported as failed, even though the actual capture+pipeline
+    # work in the same run had already completed successfully.
+    permissions:
+      contents: write
     # The Asian Handicap sweep (one page load per match, hundreds of
     # matches) is the long pole here - tens of minutes, vs ~5min for the
     # full-breadth Swisslos sweep and ~2min for the quick cycle.
