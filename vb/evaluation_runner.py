@@ -26,19 +26,42 @@ from .settlement_evidence import get_or_create_canonical_event, settlement_key
 from .storage import current_settlement_version, load_event_version, load_market_snapshot_v2
 
 
-def assemble_executed_bets(conn, strategy_version: str, now: datetime) -> list[ExecutedBet]:
-    rows = conn.execute(
-        """
-        SELECT bd.id, bd.decided_at, so.benchmark_snapshot_id, se.market_identity_id,
-               be.status, be.requested_odds, be.accepted_odds, be.accepted_stake
-        FROM bet_decision bd
-        JOIN signal_observation so ON so.id = bd.signal_observation_id
-        JOIN signal_episode se ON se.id = so.episode_id
-        LEFT JOIN bet_execution be ON be.decision_id = bd.id
-        WHERE bd.strategy_version = ?
-        """,
-        (strategy_version,),
-    ).fetchall()
+def assemble_executed_bets(
+    conn, strategy_version: str, now: datetime, since: Optional[datetime] = None
+) -> list[ExecutedBet]:
+    """`since`, when given, excludes any decision made before that
+    instant (Phase 7): a strategy_version that already had shadow
+    decisions accumulating before an experiment_protocol was frozen for
+    it still needs a real boundary for "the first decision under this
+    protocol" - the freeze doesn't retroactively make earlier shadow
+    decisions confirmatory data, since the protocol wasn't locked in
+    when they were made."""
+    if since is None:
+        rows = conn.execute(
+            """
+            SELECT bd.id, bd.decided_at, so.benchmark_snapshot_id, se.market_identity_id,
+                   be.status, be.requested_odds, be.accepted_odds, be.accepted_stake
+            FROM bet_decision bd
+            JOIN signal_observation so ON so.id = bd.signal_observation_id
+            JOIN signal_episode se ON se.id = so.episode_id
+            LEFT JOIN bet_execution be ON be.decision_id = bd.id
+            WHERE bd.strategy_version = ?
+            """,
+            (strategy_version,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT bd.id, bd.decided_at, so.benchmark_snapshot_id, se.market_identity_id,
+                   be.status, be.requested_odds, be.accepted_odds, be.accepted_stake
+            FROM bet_decision bd
+            JOIN signal_observation so ON so.id = bd.signal_observation_id
+            JOIN signal_episode se ON se.id = so.episode_id
+            LEFT JOIN bet_execution be ON be.decision_id = bd.id
+            WHERE bd.strategy_version = ? AND bd.decided_at >= ?
+            """,
+            (strategy_version, since.isoformat()),
+        ).fetchall()
 
     bets: list[ExecutedBet] = []
     for decision_id, decided_at, benchmark_snapshot_id, market_identity_id, status, req_odds, acc_odds, acc_stake in rows:
@@ -75,9 +98,10 @@ def assemble_executed_bets(conn, strategy_version: str, now: datetime) -> list[E
 
 def run_evaluation(
     conn, strategy_version: str, code_sha: str, config: dict, db_snapshot_hash: str, data_cutoff: datetime, now: datetime,
+    since: Optional[datetime] = None,
 ) -> dict:
     """assemble_executed_bets() + vb.evaluation_v2.build_report() in one
     call - the real live entry point a reporting script or dashboard
     build step would use."""
-    bets = assemble_executed_bets(conn, strategy_version, now)
+    bets = assemble_executed_bets(conn, strategy_version, now, since=since)
     return build_report(conn, bets, strategy_version, code_sha, config, db_snapshot_hash, data_cutoff, now)

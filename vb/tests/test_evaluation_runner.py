@@ -84,6 +84,38 @@ def _real_decided_bet(conn, strategy_id):
     return execution, bench_ev_id
 
 
+def _decided_bet_at(conn, strategy_id, event_id, at):
+    event = RawEvent(
+        site="pinnacle.com", sport="soccer", competition="Premier League", kickoff_utc=at + timedelta(hours=5),
+        raw_home_team="Liverpool", raw_away_team="Everton", event_id=event_id,
+    )
+    market_identity = market_key(event, MarketType.MATCH_WINNER, None, Selection.HOME, "swisslos.ch")
+    tracker = EpisodeTracker(conn, strategy_id, market_identity, threshold=0.03)
+    bench_snap, _ = _snapshot(conn, at, "pinnacle.com", event_id, 2.10)
+    comp_snap, _ = _snapshot(conn, at, "swisslos.ch", f"s-{event_id}", 2.30)
+    result = tracker.ingest(LegReadingV2(
+        received_at=at, edge=0.05, benchmark_snapshot_id=bench_snap, comparison_snapshot_id=comp_snap, edge_model="raw-v1",
+    ))
+    return process_episode_decision(conn, result, ImmediateEntryPolicy(threshold=0.03))
+
+
+def test_assemble_executed_bets_since_excludes_decisions_before_the_cutoff(tmp_path):
+    # Phase 7: a protocol frozen AFTER shadow decisions already exist
+    # for a strategy_version must not retroactively count those earlier
+    # decisions as confirmatory data.
+    conn = _db(tmp_path)
+    strategy_id = _strategy_id(conn)
+    _decided_bet_at(conn, strategy_id, "pre-freeze", T0)
+    _decided_bet_at(conn, strategy_id, "post-freeze", T0 + timedelta(days=1))
+
+    all_bets = assemble_executed_bets(conn, strategy_id, now=T0 + timedelta(days=2))
+    assert len(all_bets) == 2
+
+    since_bets = assemble_executed_bets(conn, strategy_id, now=T0 + timedelta(days=2), since=T0 + timedelta(hours=12))
+    assert len(since_bets) == 1
+    assert since_bets[0].decided_at >= T0 + timedelta(hours=12)
+
+
 def test_assemble_executed_bets_resolves_a_real_decided_and_executed_bet(tmp_path):
     conn = _db(tmp_path)
     strategy_id = _strategy_id(conn)
