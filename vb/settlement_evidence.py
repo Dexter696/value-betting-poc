@@ -152,9 +152,11 @@ def record_settlement_for_event(
     deduped here so record_settlement_version is only called once per
     genuinely distinct leg, not once per comparison site.
 
-    Returns the number of settlement_version rows recorded (0 if the
-    event was never captured into v2, or was captured but no leg was
-    ever tracked for it).
+    Returns the number of distinct legs settled (0 if the event was
+    never captured into v2, or was captured but no leg was ever
+    tracked for it) - not necessarily the number of NEW rows inserted,
+    since record_settlement_version() is itself a no-op for a leg
+    whose result hasn't actually changed since it was last settled.
     """
     from .pipeline import parse_market_identity  # local import: avoids a module-level cycle with vb.pipeline
 
@@ -208,10 +210,22 @@ def record_settlement_version(
     settlement_key, the new row's `supersedes_id` points at it — the
     old row is never touched, so an evaluation that already ran against
     it stays reproducible even after a correction.
+
+    A no-op if the current version already has the exact same result:
+    a genuine correction (a different result) always creates a new,
+    versioned row, but re-settling identical data (e.g. a repeated
+    backfill pass over already-settled events) would otherwise pile up
+    redundant "corrections" that never actually changed anything -
+    real, if harmless, noise in what's supposed to be an audit trail of
+    genuine changes. Returns the EXISTING version's id in that case,
+    not a new one.
     """
     key = settlement_key(canonical_event_id, market_type, line, selection)
     result = settle(market_type, line, selection, home_goals, away_goals)
     existing = current_settlement_version(conn, key)
+
+    if existing is not None and existing.result == result.value:
+        return existing.id
 
     version_id = new_id()
     save_settlement_version(conn, SettlementVersion(

@@ -234,6 +234,34 @@ def test_record_settlement_for_event_settles_every_leg_ever_tracked_for_that_eve
     assert current.result == SettlementResult.WON.value  # Liverpool (home) won 2-1
 
 
+def test_re_settling_identical_data_does_not_pile_up_redundant_versions(tmp_path):
+    # Found live 2026-07-29: re-running a settlement backfill pass over
+    # already-settled events (a real, expected occurrence - the backfill
+    # is safe to re-run periodically) created a brand-new
+    # settlement_version row every single time, even though the result
+    # never actually changed - noisy, not an audit trail of genuine
+    # corrections.
+    conn = _db(tmp_path)
+    event_id = _event(conn)
+    key = settlement_key(event_id, MarketType.MATCH_WINNER, None, Selection.HOME)
+
+    evidence_id = record_result_evidence(conn, event_id, provider="espn", retrieved_at=T0, status="final", home_goals=2, away_goals=1)
+    first_version = record_settlement_version(
+        conn, event_id, MarketType.MATCH_WINNER, None, Selection.HOME, evidence_id, home_goals=2, away_goals=1, created_at=T0,
+    )
+
+    # a second pass over the SAME real result (e.g. a re-run backfill)
+    second_evidence_id = record_result_evidence(conn, event_id, provider="espn", retrieved_at=T0 + timedelta(minutes=1), status="final", home_goals=2, away_goals=1)
+    second_version = record_settlement_version(
+        conn, event_id, MarketType.MATCH_WINNER, None, Selection.HOME, second_evidence_id,
+        home_goals=2, away_goals=1, created_at=T0 + timedelta(minutes=1),
+    )
+
+    assert second_version == first_version  # no new row - same result as what's already current
+    total_versions = conn.execute("SELECT COUNT(*) FROM settlement_version WHERE settlement_key = ?", (key,)).fetchone()[0]
+    assert total_versions == 1
+
+
 def test_record_settlement_for_event_returns_zero_when_the_event_was_never_captured_into_v2(tmp_path):
     conn = _db(tmp_path)
     legs_settled = record_settlement_for_event(
