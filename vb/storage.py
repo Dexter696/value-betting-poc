@@ -985,6 +985,34 @@ def list_signal_observations(conn: sqlite3.Connection, episode_id: str) -> list[
     ]
 
 
+def list_all_signal_observations(conn: sqlite3.Connection, limit: Optional[int] = None) -> list[SignalObservation]:
+    """Every observation across the WHOLE database that has a real
+    episode link, oldest first - unlike list_signal_observations
+    (scoped to one episode), this is what vb.feature_dataset needs to
+    build a training dataset spanning every tracked market. Excludes
+    episode_id IS NULL rows (a rejected reading with no open episode) -
+    those have no other way to recover which market/selection they
+    concerned, since the schema doesn't duplicate market identity onto
+    every observation row, only onto its episode.
+    """
+    query = (
+        "SELECT id, episode_id, decision_time, benchmark_snapshot_id, comparison_snapshot_id, "
+        "edge_model, edge, eligible, reject_reason FROM signal_observation "
+        "WHERE episode_id IS NOT NULL ORDER BY decision_time ASC"
+    )
+    if limit is not None:
+        query += f" LIMIT {int(limit)}"
+    rows = conn.execute(query).fetchall()
+    return [
+        SignalObservation(
+            id=row[0], episode_id=row[1], decision_time=_from_iso(row[2]), benchmark_snapshot_id=row[3],
+            comparison_snapshot_id=row[4], edge_model=row[5], edge=row[6], eligible=bool(row[7]),
+            reject_reason=RejectReason(row[8]) if row[8] else None,
+        )
+        for row in rows
+    ]
+
+
 def find_latest_snapshot_for_event_version(
     conn: sqlite3.Connection, event_version_id: str, market_type: MarketType, line: Optional[float]
 ) -> Optional[MarketSnapshotV2]:
